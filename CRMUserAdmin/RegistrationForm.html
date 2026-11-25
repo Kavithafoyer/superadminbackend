@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.0.2/dist/css/bootstrap.min.css" rel="stylesheet" integrity="sha384-EVSTQN3/azprG1Anm3QDgpJLIm9Nao0Yz1ztcQTwFspd3yD65VohhpuuCOmLASjC" crossorigin="anonymous">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body {
+      font-family: Calibri, Helvetica, sans-serif;
+      background-color: white;
+    }
+
+    .container {
+      margin-left: 30%;
+      margin-right: 30%;
+      width: 40%;
+      padding: 0px 50px 40px 50px;
+      background-color: white;
+      border: 2px solid gray;
+      border-radius: 6px;
+    }
+
+    input[type=text],
+    input[type=password],
+    textarea {
+      width: 100%;
+      padding: 10px;
+      margin: 5px 0 22px 0;
+      display: inline-block;
+      border: 1px solid gray;
+      border-radius: 6px;
+      background: #f1f1f1;
+    }
+
+    input[type=text]:focus,
+    input[type=password]:focus {
+      background-color: white;
+      outline: none;
+    }
+
+    div {
+      padding: 10px 0;
+    }
+
+    hr {
+      border: 1px solid #f1f1f1;
+      margin-bottom: 25px;
+    }
+
+    .registerbtn {
+      background-color: #4CAF50;
+      color: white;
+      padding: 16px 20px;
+      margin: 8px 0;
+      border: none;
+      cursor: pointer;
+      width: 100%;
+      opacity: 0.9;
+    }
+
+    .registerbtn:hover {
+      opacity: 1;
+    }
+
+    /* mobile responsive mode */
+    @media screen and (max-width: 580px) {
+
+      .container {
+        /* float: none !important; */
+        padding: 50px 10px 50px 20px;
+        background-color: white;
+        width: 100%;
+        margin: 0;
+      }
+
+      .image {
+      display: none;
+    }
+    input[type=text],
+    input[type=password],
+    textarea {
+      width: 100%;
+      height: 10px;
+    }
+
+      .registerbtn {
+        background-color: #4CAF50;
+      }
+
+    }
+
+    @media only screen and (min-width: 581px) and (max-width: 769px) {
+      .container {
+        /* float: none !important; */
+        padding: 50px 50px;
+        background-color: white;
+        width: 100%;
+        margin: 0;
+      }
+
+      .image {
+      
+      display: none;
+    }
+
+      .registerbtn {
+        background-color: #4CAF50;
+      }
+    }
+
+    @media only screen and (min-width: 770px) and (max-width: 1281px) {
+      body {
+      font-family: Calibri, Helvetica, sans-serif;
+      background-color: white;
+    }
+      .container {
+        width: 40%;
+        padding: 20px;
+        background-color: white;
+      }
+
+      /* .image{
+      
+      float: left;
+      padding: 30px 30px;
+      width: 400px !important;
+      height: 400px; 
+      
+      } */
+
+      .registerbtn {
+        background-color: #4CAF50;
+      }
+    }
+  </style>
+
+</head>
+<body>
+<div>
+{#    {% if messages %}#}
+{#        {%  for message in messages %}#}
+{#            <div class="toast-body bg-danger text-light position-fixed top-0 end-0 p-3 d-flex" id="toast" style="z-index: 11; border-radius: 5px;"><b class="{{ message.tags }}">{{ message }}</b></div>#}
+{#            <div class="toast-body bg-danger text-light position-fixed top-0 end-0 p-3 d-flex" id="toast" style="z-index: 11; border-radius: 5px;"><b class="{{ message.tags }}">{{ message }}</b></div>#}
+{#        {% endfor %}#}
+{#    {% endif %}#}
+</div>
+  <form action="/useradmin/userupdate/" method="post" enctype="multipart/form-data">
+    <div class="total">
+      <div class="image">
+        <!-- <img class="image" src="https://startup.mp.gov.in/assets/img/login-bg.png"> -->
+      </div>
+      <!-- <center> -->
+      <div class="container">
+        <center>
+          <h1> User Signup Form</h1>
+        </center>
+        <hr>
+
+         <input type="hidden" name="UserType" value="{{ user.UserType }}">
+         <input type="hidden" name="Url" value="{{ user.Url }}">
+         <input type="hidden" name="groups" value="{{ user.groups }}">
+         <input type="hidden" name="Created_by" value="{{ user.Created_by }}">
+        <label><b> Firstname </b></label>
+        <input type="text" name="firstname" placeholder="Enter Firstname" size="15" value="{{ user.first_name }}" required />
+        <label><b> Lastname </b></label>
+        <input type="text" name="lastname" placeholder="Enter Lastname" size="15" value="{{ user.last_name }}" required />
+        <label><b> Designation </b></label>
+        <input type="text" name="Designation" placeholder="Enter Designation" size="15" value="{{ user.Designation }}" required />
+        <label><b> Username </b></label>
+        <input type="text" name="username" placeholder="Enter Username" size="15" value="{{ user.username }}" required /><br>
+{#        <label><b> User ID </b></label>#}
+{#        <input type="text" name="UserId" placeholder="User id" size="15" required />#}
+{#        <label><b> Roles </b></label>#}
+{#        <input type="text" name="Roles" placeholder="Roles" size="15" required />#}
+        <label for="email"><b>Email</b></label><br>
+        <input type="text" placeholder="Enter Email" name="email" value="{{ user.email }}" required />
+
+        <label for="psw"><b>Password</b></label>
+        <input type="password" placeholder="Enter Password" name="psw" required />
+
+        <label for="psw-repeat"><b>Re-type Password</b></label>
+        <input type="password" placeholder="Retype Password" name="pswrepeat" required />
+{#        <div>#}
+{#          <label><b>#}
+{#              Gender :#}
+{#            </b></label><br>#}
+{#          <input type="radio" value="Male" name="gender" checked> Male#}
+{#          <input type="radio" value="Female" name="gender"> Female#}
+{#          <input type="radio" value="Other" name="gender"> Other#}
+{##}
+{#        </div>#}
+        <label><b>
+            Phone :
+          </b></label>
+        <input type="text" name="phone" placeholder="phone no." size="10" value="{{ user.PhoneNo }}" required />
+        <label><b>
+            House Number :
+          </b></label>
+        <input type="text" cols="80" rows="5" placeholder="House Number" name="HNo" value="{{ user.BuildingHuseNo }}" required/><br>
+        <label for="Street"><b>Street</b></label><br>
+        <input type="text" placeholder="Enter Street" name="Street" value="{{ user.Street }}" required /><br>
+        <label for="Area"><b>Area</b></label><br>
+        <input type="text" placeholder="Enter Area" name="Area" value="{{ user.Area }}" required /><br>
+        <label for="City"><b>City</b></label><br>
+        <input type="text" placeholder="Enter City" name="City" value="{{ user.City }}" required /><br>
+        <label for="State"><b>State</b></label><br>
+        <input type="text" placeholder="Enter State" name="State" value="{{ user.State }}" required /><br>
+        <label for="Country"><b>Country</b></label><br>
+        <input type="text" placeholder="Enter Country" name="Country" value="{{ user.Country }}" required /><br>
+ 
+        <label for="Role"><b>Role Name</b></label><br>
+        <input type="text" placeholder="Select your role" name="Role" value="{{ user.Role }}" required /><br>
+        <button type="submit" class="registerbtn">Register</button>
+      </div>
+    <!-- </center> -->
+    </div>
+  </form>
+<script>
+    document.getElementById("toast").delay(2000).fadeOut('slow');
+</script>
+<!-- <script src="http://code.jquery.com/jquery-1.9.1.min.js"></script>
+<link href="https://cdnjs.cloudflare.com/ajax/libs/toastr.js/2.0.1/css/toastr.css" rel="stylesheet"/>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/toastr.js/2.0.1/js/toastr.js"></script>
+<script type="text/javascript">
+    {% if messages %}
+            {%  for message in messages %}
+      $(document).ready(function() {
+        toastr.options.timeOut = 5000; // 2s
+        toastr.error('{{ message }}');
+      });
+      {% endfor %}
+          {% endif %}
+</script> -->
+</body>
+</html>

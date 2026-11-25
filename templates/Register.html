@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.0.2/dist/css/bootstrap.min.css" rel="stylesheet"
+        crossorigin="anonymous" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style>
+        body {
+            font-family: Calibri, Helvetica, sans-serif;
+            background-color: white;
+        }
+
+        .container {
+            width: 50%;
+            margin-left: 25%;
+            margin-right: 25%;
+            margin-top: 2%;
+            margin-bottom: 2%;
+            padding: 0px 50px 40px 50px;
+            background-color: white;
+            border: 1px solid gray;
+            border-radius: 6px;
+        }
+
+        input[type="text"],
+        input[type="password"],
+        textarea {
+            width: 100%;
+            padding: 10px;
+            margin: 0px 0 5px 0;
+            border: 1px solid gray;
+            border-radius: 6px;
+            background: #f1f1f1;
+        }
+
+        input[type="text"]:focus,
+        input[type="password"]:focus {
+            background-color: white;
+            outline: none;
+        }
+
+        hr {
+            border: 1px solid #f1f1f1;
+            margin-bottom: 25px;
+        }
+
+        .registerbtn {
+            background-color: #4caf50;
+            color: white;
+            padding: 10px 20px;
+            margin: 10px 0;
+            border: none;
+            cursor: pointer;
+            width: 100%;
+            opacity: 0.9;
+            font-size: 20px;
+            letter-spacing: 2px;
+        }
+
+        .registerbtn:hover {
+            opacity: 1;
+        }
+
+        @media screen and (max-width: 580px) {
+            .container {
+                width: 100%;
+                margin: 0;
+                padding: 50px 10px;
+            }
+
+            input[type="text"],
+            input[type="password"],
+            textarea {
+                width: 90%;
+            }
+        }
+
+        @media only screen and (min-width: 581px) and (max-width: 769px) {
+            .container {
+                width: 100%;
+                margin: 0;
+                padding: 50px 50px;
+            }
+        }
+
+        @media only screen and (min-width: 770px) and (max-width: 1281px) {
+            .container {
+                width: 40%;
+                padding: 20px;
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <div>
+        {% if messages %}
+        {% for message in messages %}
+        <div class="toast-body bg-danger text-light position-fixed top-0 end-0 p-3 d-flex" id="toast"
+            style="z-index: 11; border-radius: 5px">
+            <b class="{{ message.tags }}">{{ message }}</b>
+        </div>
+        {% endfor %}
+        {% endif %}
+    </div>
+    <form action="/{{user.Tenant}}/useradmin/userupdate/" method="post" enctype="multipart/form-data">
+        {% csrf_token %}
+        <div class="total">
+            <div class="container">
+                <br />
+                <center>
+                    <h2>User Details Form</h2>
+                </center>
+                <hr />
+                <input type="hidden" name="Organization_Id" value="{{ user.Organization_Id }}" />
+                <input type="hidden" name="UserType" value="{{ user.UserType }}" />
+                <input type="hidden" name="Url" value="{{ user.Url }}" />
+                <input type="hidden" name="groups" value="{{ user.groups }}" />
+                <input type="hidden" name="user_permissions" value="{{ user.user_permissions }}" />
+                <input type="hidden" name="Created_by" value="{{ user.Created_by }}" />
+                <div class="row">
+                    <div class="col">
+                        <label><b> Firstname </b></label>
+                        <input type="text" name="firstname" placeholder="Enter Firstname" value="{{ user.firstname }}"
+                            class="form-control" required />
+                    </div>
+                    <div class="col">
+                        <label><b> Lastname </b></label>
+                        <input type="text" name="lastname" placeholder="Enter Lastname" value="{{ user.last_name }}"
+                            class="form-control" required />
+                    </div>
+                </div>
+                <div class="row">
+                    <div class="col">
+                        <label><b> Username </b></label>
+                        <input type="text" name="username" placeholder="Enter Username" value="{{ user.username }}"
+                            class="form-control" required />
+                    </div>
+                    <div class="col">
+                        <label for="email"><b>Email</b></label>
+                        <input type="text" placeholder="Enter Email" name="email" value="{{ user.email }}"
+                            class="form-control" required />
+                    </div>
+                </div>
+                <div class="row">
+                    <div class="col">
+                        <label for="psw"><b>Password</b></label>
+                        <input type="password" placeholder="Enter Password" name="psw" class="form-control" required />
+                    </div>
+                    <div class="col">
+                        <label for="psw-repeat"><b>Re-type Password</b></label>
+                        <input type="password" placeholder="Retype Password" name="pswrepeat" class="form-control"
+                            required />
+                    </div>
+                </div>
+                <div class="row">
+                    <div class="col">
+                        <label><b> Designation </b></label>
+                        <input type="text" name="Designation" placeholder="Enter Designation" class="form-control"
+                            value="{{ user.Designation }}" required />
+                    </div>
+                    <div class="col">
+                        <label><b> Phone : </b></label>
+                        <input type="text" name="phone" placeholder="phone no." class="form-control"
+                            value="{{ user.PhoneNo }}" required />
+                    </div>
+                </div>
+                <div class="row">
+                    <div class="col">
+                        <label><b> House Number : </b></label>
+                        <input type="text" placeholder="House Number" name="HNo" value="{{ user.BuildingHuseNo }}"
+                            class="form-control" required />
+                    </div>
+                    <div class="col">
+                        <label for="Street"><b>Street</b></label>
+                        <input type="text" placeholder="Enter Street" name="Street" value="{{ user.Street }}"
+                            class="form-control" required />
+                    </div>
+                </div>
+                <div class="row">
+                    <div class="col">
+                        <label for="Area"><b>Area</b></label>
+                        <input type="text" placeholder="Enter Area" name="Area" value="{{ user.Area }}"
+                            class="form-control" required />
+                    </div>
+                    <div class="col">
+                        <label for="City"><b>City</b></label>
+                        <input type="text" placeholder="Enter City" name="City" value="{{ user.City }}"
+                            class="form-control" required />
+                    </div>
+                </div>
+                <div class="row">
+                    <div class="col">
+                        <label for="State"><b>State</b></label>
+                        <input type="text" placeholder="Enter State" name="State" value="{{ user.State }}"
+                            class="form-control" required />
+                    </div>
+                    <div class="col">
+                        <label for="Country"><b>Country</b></label>
+                        <input type="text" placeholder="Enter Country" name="Country" value="{{ user.Country }}"
+                            class="form-control" required />
+                    </div>
+                </div>
+                <div class="row">
+                    <div class="col">
+                        <label for="UserType"><b>User Type</b></label>
+                        <input type="text" placeholder="User Type" name="UserType" value="{{ user.UserType }}"
+                            class="form-control" required />
+                    </div>
+                </div>
+                <button type="submit" class="registerbtn">Register</button>
+            </div>
+        </div>
+    </form>
+    <script src="http://code.jquery.com/jquery-1.9.1.min.js"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/toastr.js/2.0.1/css/toastr.css" rel="stylesheet" />
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/toastr.js/2.0.1/js/toastr.js"></script>
+    <script type="text/javascript">
+        {% if messages %}
+        {% for message in messages %}
+        $(document).ready(function () {
+            toastr.options.timeOut = 5000; // 2s
+            toastr.error('{{ message }}');
+        });
+        {% endfor %}
+        {% endif %}
+    </script>
+</body>
+
+</html>
