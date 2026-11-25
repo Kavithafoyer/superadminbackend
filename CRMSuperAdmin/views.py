@@ -13120,6 +13120,216 @@ class CustomerOverviewAnalyticsAPI(APIView):
 
 
 
+from CRMSuperAdmin.services.customer_overview_service import (
+    build_customer_usage_health_overview,
+    parse_positive_int,
+    resolve_customer_account,
+)
+
+
+class CustomerUsageHealthAnalyticsAPI(APIView):
+    """
+    Returns Customer Overview analytics for:
+    - Usage & Adoption (Last 30 Days)
+    - Customer Health (Score, Status & 4-item Checklist)
+    - Usage Trend – Active Users (Monthly curve & growth vs previous period)
+
+    Strictly resolves customer_id (and optional product_id) by integer primary key (pk).
+    """
+
+    # authentication_classes = [JWTAuthentication]
+    # permission_classes = [IsAuthenticated]
+
+    def get(self, request, *args, **kwargs):
+        try:
+            raw_customer_id = (
+                request.query_params.get("customer_id")
+                or request.query_params.get("id")
+                or request.query_params.get("account_id")
+            )
+            customer_pk = parse_positive_int(raw_customer_id, "customer_id")
+
+            raw_product_id = request.query_params.get("product_id")
+            product_pk = (
+                parse_positive_int(raw_product_id, "product_id")
+                if raw_product_id not in (None, "")
+                else None
+            )
+
+            raw_days = request.query_params.get("days", 30)
+            days = parse_positive_int(raw_days, "days")
+            if days > 365:
+                raise ValueError("days must be between 1 and 365.")
+
+            raw_months = request.query_params.get("months", 12)
+            months = parse_positive_int(raw_months, "months")
+            if months > 24:
+                raise ValueError("months must be between 1 and 24.")
+
+            raw_year = request.query_params.get("year")
+            year = None
+            if raw_year not in (None, ""):
+                year = parse_positive_int(raw_year, "year")
+                if year < 2000 or year > 2100:
+                    raise ValueError("year must be between 2000 and 2100.")
+
+            account = resolve_customer_account(customer_pk)
+            if not account:
+                return Response(
+                    {
+                        "status": False,
+                        "message": "Customer account not found.",
+                        "data": None,
+                    },
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+
+            data = build_customer_usage_health_overview(
+                account=account,
+                product_pk=product_pk,
+                days=days,
+                months=months,
+                year=year,
+            )
+            return Response(
+                {
+                    "status": True,
+                    "message": "Customer usage, health, and trend analytics retrieved successfully",
+                    "data": data,
+                },
+                status=status.HTTP_200_OK,
+            )
+        except ValueError as e:
+            return Response(
+                {
+                    "status": False,
+                    "message": str(e),
+                    "data": None,
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        except Exception as e:
+            return Response(
+                {
+                    "status": False,
+                    "message": str(e),
+                    "data": None,
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+
+from CRMSuperAdmin.DashboardService.superadmin_dashboard_service import (
+    build_business_overview_dashboard,
+    build_product_performance_dashboard,
+    get_system_health,
+    parse_dashboard_filters,
+)
+
+
+class _BaseDashboardAPI(APIView):
+    """Shared authentication and filter error handling for SuperAdmin dashboard endpoints."""
+
+    # authentication_classes = [JWTAuthentication]
+    # permission_classes = [IsAuthenticated]
+
+    def _run_dashboard(self, request, builder_fn, success_message):
+        try:
+            filters = parse_dashboard_filters(request.query_params)
+            data = builder_fn(filters)
+            return Response(
+                {
+                    "status": True,
+                    "message": success_message,
+                    "data": data,
+                },
+                status=status.HTTP_200_OK,
+            )
+        except ValueError as e:
+            return Response(
+                {"status": False, "message": str(e), "data": None},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        except Exception as e:
+            return Response(
+                {"status": False, "message": str(e), "data": None},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+
+class BusinessOverviewDashboardAPI(_BaseDashboardAPI):
+    """Returns Business Overview KPIs, growth/revenue/churn trends, conversion funnel, and System Health."""
+
+    def get(self, request, *args, **kwargs):
+        return self._run_dashboard(
+            request,
+            build_business_overview_dashboard,
+            "Business overview dashboard retrieved successfully",
+        )
+
+
+class SystemHealthAPI(APIView):
+    """Returns live PostgreSQL, application disk, and queue health for the System Health refresh action."""
+
+    authentication_classes = [JWTAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, *args, **kwargs):
+        try:
+            return Response(
+                {
+                    "status": True,
+                    "message": "System health metrics retrieved successfully",
+                    "data": get_system_health(),
+                },
+                status=status.HTTP_200_OK,
+            )
+        except Exception as e:
+            return Response(
+                {"status": False, "message": str(e), "data": None},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+
+class ProductPerformanceDashboardAPI(_BaseDashboardAPI):
+    """Returns Product-wise Performance KPIs, summary table, and 6 comparison charts."""
+
+    def get(self, request, *args, **kwargs):
+        return self._run_dashboard(
+            request,
+            build_product_performance_dashboard,
+            "Product-wise performance dashboard retrieved successfully",
+        )
+
+
+from CRMSuperAdmin.DashboardService.customer_partner_kpi_service import (
+    build_customer_kpi_dashboard,
+    build_partner_kpi_dashboard,
+)
+
+
+class CustomerKpiDashboardAPI(_BaseDashboardAPI):
+    """Returns Customer KPIs, growth trend, segmentation, conversion/retention, and Top 5 Customers by ARR."""
+
+    def get(self, request, *args, **kwargs):
+        return self._run_dashboard(
+            request,
+            build_customer_kpi_dashboard,
+            "Customer KPIs dashboard retrieved successfully",
+        )
+
+
+class PartnerKpiDashboardAPI(_BaseDashboardAPI):
+    """Returns Partner KPIs, acquisition & certification trend, segmentation, metrics, and Top 5 Partners."""
+
+    def get(self, request, *args, **kwargs):
+        return self._run_dashboard(
+            request,
+            build_partner_kpi_dashboard,
+            "Partner KPIs dashboard retrieved successfully",
+        )
+
+
 # Add ons :-
 
 # Add On Category :-
@@ -16849,7 +17059,6 @@ class PartnerAssignMailAPI(APIView):
         except Exception as e:
             logger.exception("Lead partner assignment failed")
             return json_response({"Error": str(e)}, status.HTTP_400_BAD_REQUEST)
-
 
 
 

@@ -437,6 +437,14 @@ path('AuditHistoryDetails/', AuditHistoryDetails.as_view()),
 
 # Customer Overview Analytics & KPIs
 path('CustomerOverviewAnalytics/', CustomerOverviewAnalyticsAPI.as_view()),
+path('CustomerUsageHealthAnalytics/', CustomerUsageHealthAnalyticsAPI.as_view(), name='customer-usage-health-analytics'),
+
+# SuperAdmin Dashboard APIs (Business Overview, System Health & Product-wise Performance)
+path('BusinessOverviewDashboardAPI/', BusinessOverviewDashboardAPI.as_view(), name='business-overview-dashboard'),
+path('SystemHealthAPI/', SystemHealthAPI.as_view(), name='system-health-api'),
+path('ProductPerformanceDashboardAPI/', ProductPerformanceDashboardAPI.as_view(), name='product-performance-dashboard'),
+path('CustomerKpiDashboardAPI/', CustomerKpiDashboardAPI.as_view(), name='customer-kpi-dashboard'),
+path('PartnerKpiDashboardAPI/', PartnerKpiDashboardAPI.as_view(), name='partner-kpi-dashboard'),
 
 
 
