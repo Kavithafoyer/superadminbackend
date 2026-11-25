@@ -10,6 +10,7 @@ path('ChatParticipantCRUD/',ChatParticipantCRUD.as_view()),
 path('ChatParticipantList/',ChatParticipantListwithPagination.as_view()),
 path('ChatParticipantSearch/',ChatParticipantSearch.as_view()),
 
+
 path('MessageCRUD/',MessageCRUD.as_view()),
 path('MessageList/',MessageListwithPagination.as_view()),
 path('MessageSearch/',MessageSearch.as_view()),
