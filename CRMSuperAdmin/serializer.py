@@ -2104,6 +2104,23 @@ class AddonPricingSerializer(serializers.ModelSerializer):
         model = AddonPricing
         fields = '__all__'
 
+    def to_representation(self, instance):
+        ret = super().to_representation(instance)
+        try:
+            if instance.Addon:
+                ret['Category'] = getattr(instance.Addon, 'Category', '') or ''
+                ret['Addon_Code'] = getattr(instance.Addon, 'AddonMaster_Id', '') or ''
+                ret['License_Model'] = getattr(instance.Addon, 'License_Model', '') or 'Per Tenant'
+            if instance.Price_Template:
+                ret['Pricing_Model'] = getattr(instance.Price_Template, 'Billing_Type', '') or 'Per Tenant'
+                ret['Billing_Cycle'] = getattr(instance.Price_Template, 'Billing_Cycle', '') or 'Monthly'
+                ret['Currency'] = getattr(instance.Price_Template, 'Currency', '') or 'INR'
+                ret['Template_Code'] = getattr(instance.Price_Template, 'Template_Code', '') or ''
+                ret['Price_Template_Name'] = getattr(instance.Price_Template, 'Template_Name', '') or ret.get('Price_Template_Name') or ''
+        except Exception:
+            pass
+        return ret
+
 class AddonPricingSerializers(serializers.ModelSerializer):
 
     class Meta:
@@ -2117,6 +2134,24 @@ class AddonTieredPricingSerializer(serializers.ModelSerializer):
     class Meta:
         model = AddonTieredPricing
         fields = '__all__'
+
+    def to_representation(self, instance):
+        ret = super().to_representation(instance)
+        try:
+            if instance.Addon_Pricing:
+                ret['Addon_Name'] = instance.Addon_Pricing.Addon_Name or ''
+                ret['Pricing_Id'] = instance.Addon_Pricing.id
+                ret['Addon_Code'] = getattr(instance.Addon_Pricing.Addon, 'AddonMaster_Id', '') if instance.Addon_Pricing.Addon else ''
+                ret['Category'] = getattr(instance.Addon_Pricing.Addon, 'Category', '') if instance.Addon_Pricing.Addon else ''
+                if instance.Addon_Pricing.Price_Template:
+                    ret['Billing_Cycle'] = instance.Addon_Pricing.Price_Template.Billing_Cycle or 'Monthly'
+                    ret['Currency'] = instance.Addon_Pricing.Price_Template.Currency or 'INR'
+                    ret['Template_Code'] = instance.Addon_Pricing.Price_Template.Template_Code or ''
+            ret['Tier_Price_Display'] = f"₹{float(instance.Tier_Price):,.2f}" if instance.Tier_Price else '₹0.00'
+            ret['Status'] = 'Active' if instance.Is_Active else 'Inactive'
+        except Exception:
+            pass
+        return ret
 
 class AddonTieredPricingSerializers(serializers.ModelSerializer):
 
@@ -2132,6 +2167,21 @@ class AddonDiscountCouponSerializer(serializers.ModelSerializer):
         model = AddonDiscountCoupon
         fields = '__all__'
 
+    def to_representation(self, instance):
+        ret = super().to_representation(instance)
+        try:
+            val_num = float(instance.Discount_Value) if instance.Discount_Value else 0
+            if instance.Discount_Type == 'Percentage' or '%' in str(instance.Discount_Type or ''):
+                ret['Formatted_Value'] = f"{int(val_num) if val_num.is_integer() else val_num}%"
+            else:
+                ret['Formatted_Value'] = f"₹{int(val_num) if val_num.is_integer() else val_num:,.2f}"
+            ret['Applicable_Addon_Names'] = [a.Addon_Name for a in instance.Applicable_Addons.all()]
+            ret['Addon_Count'] = instance.Applicable_Addons.count()
+            ret['Status'] = 'Active' if instance.Is_Active else 'Inactive'
+        except Exception:
+            pass
+        return ret
+
 class AddonDiscountCouponSerializers(serializers.ModelSerializer):
 
     class Meta:
@@ -2146,6 +2196,50 @@ class AddonPriceHistorySerializer(serializers.ModelSerializer):
     class Meta:
         model = AddonPriceHistory
         fields = '__all__'
+
+    def to_representation(self, instance):
+        ret = super().to_representation(instance)
+        try:
+            pricing = getattr(instance, 'Addon_Pricing', None)
+            addon = getattr(pricing, 'Addon', None) if pricing else None
+
+            addon_name = (
+                getattr(pricing, 'Addon_Name', None)
+                or (getattr(addon, 'Addon_Name', None) if addon else None)
+                or 'Add-on'
+            )
+            ret['Addon_Name'] = addon_name
+            ret['Pricing_Id'] = pricing.id if pricing else None
+
+            product_name = 'Pegatto CRM'
+            if addon and hasattr(addon, 'Products'):
+                prod = addon.Products.first()
+                if prod and getattr(prod, 'Product_Name', None):
+                    product_name = prod.Product_Name
+            ret['Product'] = product_name
+
+            category_name = 'Communication'
+            if addon and getattr(addon, 'Category', None):
+                category_name = addon.Category
+            elif pricing and getattr(pricing, 'Category', None):
+                category_name = pricing.Category
+            ret['Category'] = category_name
+
+            old_price = float(instance.Old_Base_Price) if instance.Old_Base_Price is not None else 0.0
+            new_price = float(instance.New_Base_Price) if instance.New_Base_Price is not None else 0.0
+            change_amount = round(new_price - old_price, 2)
+            change_pct = round(((new_price - old_price) / old_price * 100), 2) if old_price > 0 else 0.0
+
+            ret['Previous_Price'] = old_price
+            ret['New_Price'] = new_price
+            ret['Change_Amount'] = change_amount
+            ret['Change_Percentage'] = change_pct
+            ret['Reason'] = getattr(instance, 'Reason', None) or 'Regular price adjustment'
+            ret['Changed_By_Name'] = instance.Changed_By.username if instance.Changed_By else 'SA (Super Admin)'
+            ret['Effective_Date'] = instance.Change_Date.strftime('%d %b %Y') if instance.Change_Date else ''
+        except Exception:
+            pass
+        return ret
 
 class AddonPriceHistorySerializers(serializers.ModelSerializer):
 

@@ -184,7 +184,7 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
-    # 'CRMSuperAdmin.SW_DB_Middleware_User.TenantMiddleware',
+    'CRMSuperAdmin.SW_DB_Middleware_User.TenantMiddleware',
     'CRMSuperAdmin.UpdateLastActivityMiddleware.UpdateLastActivityMiddleware',
     'corsheaders.middleware.CorsMiddleware',
     'django_prometheus.middleware.PrometheusAfterMiddleware',
@@ -253,11 +253,8 @@ WSGI_APPLICATION = 'CRM.wsgi.application'
 # DATABASES = {
 # 'default': {
 #         "ENGINE":"django.db.backends.postgresql_psycopg2",
-#         "NAME":"pegattosuperadmin",
 #         "NAME":"SUPERADMIN_DB",
 #         "USER":"postgres",
-#         "PASSWORD":"123",
-#         "PASSWORD":"123",
 #         "PASSWORD":"Foyer@123",
 #         "HOST":"localhost",
 #         "PORT":"5432"
