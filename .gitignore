@@ -10,6 +10,7 @@ supenv/
 
 # Local environment configuration
 /.env
+/local-*.sqlite3
 
 # Compiled Java class files
 *.class

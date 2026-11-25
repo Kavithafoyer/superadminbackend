@@ -184,7 +184,7 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
-    # 'CRMSuperAdmin.SW_DB_Middleware_User.TenantMiddleware',
+    'CRMSuperAdmin.SW_DB_Middleware_User.TenantMiddleware',
     'CRMSuperAdmin.UpdateLastActivityMiddleware.UpdateLastActivityMiddleware',
     'corsheaders.middleware.CorsMiddleware',
     'django_prometheus.middleware.PrometheusAfterMiddleware',
@@ -253,12 +253,9 @@ WSGI_APPLICATION = 'CRM.wsgi.application'
 # DATABASES = {
 # 'default': {
 #         "ENGINE":"django.db.backends.postgresql_psycopg2",
-#         "NAME":"pegattosuperadmin",
-#         "NAME":"SUPERADMIN_DB",
+#         "NAME":"superadmin_pegatto",
 #         "USER":"postgres",
 #         "PASSWORD":"123",
-#         "PASSWORD":"123",
-#         "PASSWORD":"Foyer@123",
 #         "HOST":"localhost",
 #         "PORT":"5432"
 
@@ -474,15 +471,17 @@ REST_FRAMEWORK = {
 # }
 
 SIMPLE_JWT = {
-    # Access token valid for 1 day (24 hours)
-    'ACCESS_TOKEN_LIFETIME': timedelta(days=1),
+    # Access token valid for 15 minutes
+    'ACCESS_TOKEN_LIFETIME': timedelta(minutes=50),
 
-    # Refresh token valid for 7 days
-    'REFRESH_TOKEN_LIFETIME': timedelta(days=7),
+    # Refresh token valid for 1 day
+    'REFRESH_TOKEN_LIFETIME': timedelta(days=1),
 
-    # Disable aggressive rotation/blacklisting to avoid sudden session drops
-    'ROTATE_REFRESH_TOKENS': False,
-    'BLACKLIST_AFTER_ROTATION': False,
+    # Generate new refresh token on every refresh
+    'ROTATE_REFRESH_TOKENS': True,
+
+    # Blacklist old refresh token after rotation
+    'BLACKLIST_AFTER_ROTATION': True,
 
     'ALGORITHM': 'HS256',
     'SIGNING_KEY': config('SECRET_KEY'), #SECRET_KEY,

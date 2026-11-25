@@ -35,7 +35,7 @@ from validate_email import validate_email
 # 3. Django Imports
 # =========================
 from django.conf import settings
-from django.shortcuts import render, redirect
+from django.shortcuts import get_object_or_404, render, redirect
 from django.http import HttpResponse, JsonResponse, HttpResponseRedirect
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
@@ -58,6 +58,7 @@ from django.contrib.auth.password_validation import validate_password
 # =========================
 # 4. Django REST Framework
 # =========================
+from rest_framework import serializers
 from rest_framework.views import APIView
 from rest_framework.generics import ListAPIView
 from rest_framework.decorators import api_view
@@ -13310,129 +13311,172 @@ class AddonMasterCards(APIView):
 # Add on Product compatability :-
 
 
+def compatibility_rules():
+    return AddonProductCompatibility.objects.filter(
+        Is_Deleted=False, Addon__Is_Deleted=False, Product__Is_Deleted=False,
+    ).order_by('-id')
+
+
 class AddonProductCompatibilityCRUD(APIView):
-    def post(self,request,*args,**kwargs):
-        try:
-            data=request.data
-            serialize=AddonProductCompatibilitySerializer(data=data)
-            if serialize.is_valid():
-                serialize.save()
-            output=JSONRenderer().render(serialize.data)
-            return HttpResponse(output,content_type="application/json",status=status.HTTP_200_OK)
-        except Exception as e:
-            output = JSONRenderer().render({"Error":str(e)})
-            return HttpResponse(output,content_type="application/json", status=status.HTTP_400_BAD_REQUEST)
+    permission_classes = [IsAuthenticated]
 
-    def get(self,request,*args,**kwargs):
-        try:
-            data=request.query_params
-            module=AddonProductCompatibility.objects.get(id=data['id'])
-            serialize=AddonProductCompatibilitySerializer(module)
-            output=JSONRenderer().render(serialize.data)
-            return HttpResponse(output,content_type="application/json",status=status.HTTP_200_OK)
-        except Exception as e:
-            output = JSONRenderer().render({"Error":str(e)})
-            return HttpResponse(output, content_type="application/json", status=status.HTTP_400_BAD_REQUEST)
+    @staticmethod
+    def rule_id(data):
+        field = serializers.IntegerField(min_value=1)
+        return field.run_validation(data.get('id'))
 
-    def put(self,request,*args,**kwargs):
-        try:
-            data=request.data
-            module=AddonProductCompatibility.objects.get(id=data['id'])
-            serialize=AddonProductCompatibilitySerializer(instance=module,data=data)
-            if serialize.is_valid():
-                serialize.save()
-            output=JSONRenderer().render(serialize.data)
-            return HttpResponse(output, content_type="application/json",status=status.HTTP_200_OK)
-        except Exception as e:
-            output = JSONRenderer().render({"Error":str(e)})
-            return HttpResponse(output, content_type="application/json", status=status.HTTP_400_BAD_REQUEST)
+    @staticmethod
+    def sync_supported_product(addon, rule):
+        supports_product = (
+            not rule.Is_Deleted and rule.Is_Active and rule.Is_Compatible
+            and rule.Compatibility_Type != 'incompatible'
+        )
+        if supports_product:
+            addon.Products.add(rule.Product_id)
+        else:
+            addon.Products.remove(rule.Product_id)
 
-    def patch(self,request,*args,**kwargs):
-        try:
-            data=request.data
-            module=AddonProductCompatibility.objects.get(id=data['id'])
-            serialize=AddonProductCompatibilitySerializer(instance=module,data=data,partial=True)
-            if serialize.is_valid():
-                serialize.save()
-            output=JSONRenderer().render(serialize.data)
-            return HttpResponse(output, content_type="application/json",status=status.HTTP_200_OK)
-        except Exception as e:
-            output = JSONRenderer().render({"Error":str(e)})
-            return HttpResponse(output, content_type="application/json", status=status.HTTP_400_BAD_REQUEST)
+    def lock_rule(self, rule_id):
+        rule = get_object_or_404(compatibility_rules(), pk=rule_id)
+        addon = get_object_or_404(AddonMaster.objects.select_for_update(), pk=rule.Addon_id, Is_Deleted=False)
+        rule = get_object_or_404(compatibility_rules().select_for_update(), pk=rule_id, Addon=addon)
+        return addon, rule
 
+    def get(self, request, *args, **kwargs):
+        rule = get_object_or_404(compatibility_rules(), pk=self.rule_id(request.query_params))
+        return Response(AddonProductCompatibilitySerializer(rule).data)
 
-    def delete(self,request,*args,**kwargs):
-        try:
-            data=request.query_params
-            module=AddonProductCompatibility.objects.get(id=data['id'])
-            serialize=AddonProductCompatibilitySerializer(module,{"Is_Deleted":True},partial=True)
-            if serialize.is_valid():
-                serialize.save()
-            output=JSONRenderer().render(serialize.data)
-            return HttpResponse(output, content_type="application/json",status=status.HTTP_200_OK)
-        except Exception as e:
-            output = JSONRenderer().render({"Error":str(e)})
-            return HttpResponse(output, content_type="application/json",status=status.HTTP_400_BAD_REQUEST)
+    @transaction.atomic
+    def post(self, request, *args, **kwargs):
+        batch = 'Products' in request.data
+        grouped = batch and 'Removed_Products' in request.data
+        product_field = serializers.ListField(child=serializers.IntegerField(min_value=1), allow_empty=grouped)
+        removed_ids = set()
+        changed_fields = set()
+        if batch:
+            product_ids = list(dict.fromkeys(product_field.run_validation(request.data['Products'])))
+            if grouped:
+                removed_ids = set(product_field.run_validation(request.data['Removed_Products']))
+                changed_fields = set(serializers.ListField(child=serializers.ChoiceField(choices=(
+                    'Compatibility_Type', 'Dependencies', 'Version_Constraint', 'Minimum_Version',
+                    'Maximum_Version', 'Rule_Description', 'Is_Active',
+                ))).run_validation(request.data.get('Changed_Fields', [])))
+                if removed_ids.intersection(product_ids) or not (product_ids or removed_ids):
+                    return Response({'Error': 'Select valid, distinct products to save or remove.'},
+                                    status=status.HTTP_400_BAD_REQUEST)
+        else:
+            product_ids = [serializers.IntegerField(min_value=1).run_validation(request.data.get('Product'))]
+
+        addon_id = serializers.IntegerField(min_value=1).run_validation(request.data.get('Addon'))
+        addon = get_object_or_404(AddonMaster.objects.select_for_update(), pk=addon_id, Is_Deleted=False)
+        rows = AddonProductCompatibility.objects.select_for_update().filter(Addon=addon, Product_id__in=set(product_ids) | removed_ids)
+        existing = {rule.Product_id: rule for rule in rows}
+        edit_id = self.rule_id(request.data) if batch and 'id' in request.data else None
+        if edit_id and not any(rule.pk == edit_id and not rule.Is_Deleted for rule in existing.values()):
+            return Response({'Error': 'Include the product of the rule being edited.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        pending = []
+        for product_id in product_ids:
+            previous = existing.get(product_id)
+            editing = previous is not None and not previous.Is_Deleted and (grouped or previous.pk == edit_id)
+            if previous and not previous.Is_Deleted and not editing:
+                product_name = previous.Product_Name or previous.Product.Product_Name or product_id
+                return Response({'Error': f'A rule already exists for {product_name}. Open that product rule to edit it.'},
+                                status=status.HTTP_409_CONFLICT)
+            values = request.data.dict() if hasattr(request.data, 'dict') else request.data.copy()
+            if grouped and editing:
+                values = {name: value for name, value in values.items() if name in changed_fields}
+            values.update(Addon=addon_id, Product=product_id)
+            serializer = AddonProductCompatibilitySerializer(previous, data=values, partial=editing)
+            serializer.is_valid(raise_exception=True)
+            pending.append((serializer, previous))
+
+        for serializer, previous in pending:
+            rule = serializer.save(
+                Is_Deleted=False, Is_Active=serializer.validated_data.get(
+                    'Is_Active', previous.Is_Active if previous and not previous.Is_Deleted else True,
+                ),
+                Created_By=previous.Created_By if previous else request.user,
+                Updated_By=request.user, Updated_Date=timezone.localdate(),
+            )
+            self.sync_supported_product(addon, rule)
+        if grouped:
+            AddonProductCompatibility.objects.filter(Addon=addon, Product_id__in=removed_ids, Is_Deleted=False).update(
+                Is_Deleted=True, Is_Active=False, Updated_By=request.user, Updated_Date=timezone.localdate(),
+            )
+            if removed_ids:
+                addon.Products.remove(*removed_ids)
+            return Response([serializer.data for serializer, _ in pending])
+        if batch:
+            return Response([serializer.data for serializer, _ in pending],
+                            status=status.HTTP_200_OK if edit_id else status.HTTP_201_CREATED)
+        serializer, previous = pending[0]
+        return Response(serializer.data, status=status.HTTP_200_OK if previous else status.HTTP_201_CREATED)
+
+    @transaction.atomic
+    def put(self, request, *args, **kwargs):
+        addon, rule = self.lock_rule(self.rule_id(request.data))
+        for field in ('Addon', 'Product'):
+            if field in request.data and str(request.data[field]) != str(getattr(rule, f'{field}_id')):
+                return Response({field: 'Create a new rule to change this selection.'}, status=status.HTTP_400_BAD_REQUEST)
+        serializer = AddonProductCompatibilitySerializer(rule, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        rule = serializer.save(Updated_By=request.user, Updated_Date=timezone.localdate())
+        self.sync_supported_product(addon, rule)
+        return Response(serializer.data)
+
+    def patch(self, request, *args, **kwargs):
+        return self.put(request, *args, **kwargs)
+
+    @transaction.atomic
+    def delete(self, request, *args, **kwargs):
+        addon, rule = self.lock_rule(self.rule_id(request.query_params))
+        rule.Is_Deleted = True
+        rule.Is_Active = False
+        rule.Updated_By = request.user
+        rule.Updated_Date = timezone.localdate()
+        rule.save(update_fields=['Is_Deleted', 'Is_Active', 'Updated_By', 'Updated_Date'])
+        self.sync_supported_product(addon, rule)
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class AddonProductCompatibilityListwithPagination(ListAPIView):
+    permission_classes = [IsAuthenticated]
+
     queryset = AddonProductCompatibility.objects.all()
     serializer_class = AddonProductCompatibilitySerializer
-    # pagination_class = CustomPagination
-    def get_queryset(self):
-        try:
-            data=self.request.headers
-            module=AddonProductCompatibility.objects.filter(Q(Is_Deleted=False)).order_by('-id')
-            return module
-        except Exception as e:
-            raise Exception(f"Error while fetching Expense: {str(e)}")
-
-
-class AddonProductCompatibilitySearch(ListAPIView):
-    queryset=AddonProductCompatibility.objects.all()
-    serializer_class = AddonProductCompatibilitySerializer
 
     def get_queryset(self):
-        try:
-            data = self.request.GET.get('search')
-            module = AddonProductCompatibility.objects.filter(
-                (
-                    Q(Addon_Name__icontains=data) |
-                    Q(Product_Name__icontains=data)                                                                    
-                ) & Q(Is_Deleted=False)
-            )
-            return module
-        except Exception as e:
-            raise Exception(f"Error while fetching Expense: {str(e)}")
+        return compatibility_rules()
+
+
+class AddonProductCompatibilitySearch(AddonProductCompatibilityListwithPagination):
+    def get_queryset(self):
+        term = self.request.query_params.get('search', '').strip()
+        return super().get_queryset().filter(
+            Q(Addon__Addon_Name__icontains=term) | Q(Product__Product_Name__icontains=term) |
+            Q(Addon_Name__icontains=term) | Q(Product_Name__icontains=term)
+        )
 
 
 class AddonProductCompatibilitylistwithoutpaginaton(APIView):
-    def get(self,request,*args,**kwargs):
-        data=request.query_params
-        module = AddonProductCompatibility.objects.filter(Is_Deleted=False)
-        serialize = AddonProductCompatibilitySerializer(module,many=True)
-        output = JSONRenderer().render(serialize.data)
-        return HttpResponse(output, content_type='application/json', status=status.HTTP_200_OK)
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, *args, **kwargs):
+        return Response(AddonProductCompatibilitySerializer(compatibility_rules(), many=True).data)
 
 
-class AddonProductCompatibilityFilter(ListAPIView):
-    queryset=AddonProductCompatibility.objects.all()
-    serializer_class=AddonProductCompatibilitySerializer
-
-    def post(self,request,*args,**kwargs):
-        try:
-            data=request.data
-            filter_data={"Is_Deleted":False}
-        
-            if data.get("Created_By"):
-                filter_data["Created_By"]=data.get("Created_By")
-            if data.get("fromdate") and data.get("todate"):
-                filter_data["Created_Date__date__range"]=[data.get("fromdate"),data.get("todate")]
-
-            return requestget(model=AddonProductCompatibility,serializer=AddonProductCompatibilitySerializer,data=filter_data,page=data.get("page",1),Operator='and')
-
-        except Exception as e:
-            return HttpResponse(JSONRenderer().render({"Error":str(e)}),content_type='application/json',status=status.HTTP_400_BAD_REQUEST)
+class AddonProductCompatibilityFilter(AddonProductCompatibilityListwithPagination):
+    def post(self, request, *args, **kwargs):
+        data = request.data
+        filters = {'Is_Deleted': False, 'Addon__Is_Deleted': False, 'Product__Is_Deleted': False}
+        for field in ('Created_By', 'Addon', 'Product'):
+            if data.get(field):
+                filters[field] = data[field]
+        if data.get('fromdate') and data.get('todate'):
+            filters['Created_Date__range'] = [data['fromdate'], data['todate']]
+        return requestget(model=AddonProductCompatibility, serializer=AddonProductCompatibilitySerializer,
+                          data=filters, page=data.get('page', 1), Operator='and')
 
 
 # Add on Price Template 

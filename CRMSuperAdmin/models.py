@@ -1,3 +1,4 @@
+from uuid import uuid4
 # =========================
 # 1. Python Standard Library
 # =========================
@@ -314,16 +315,7 @@ def AddonCategory_I():
 
 
 def AddonProductCompatibility_I():
-    Task= AddonProductCompatibility.objects.all().order_by('id').last()
-    if not Task:
-        return "APC" + "000000001"
-    Tasking = Task. AddonProductCompatibility_Id
-    Taski=int(Tasking[3:])
-    Tas= Taski + 1
-    Configur = "APC" + str(Tas).zfill(9)
-    return Configur
-
-
+    return f'APC{uuid4().hex}'
 
 
 def AddonPriceTemplate_I():
@@ -516,12 +508,18 @@ class AddonProductCompatibility(models.Model):
     Product_Name = models.CharField(max_length=250, blank=True, null=True)
     Product = models.ForeignKey('ProductMaster', on_delete=models.CASCADE, related_name='AddonCompatibilities')
     Is_Compatible = models.BooleanField(default=True)
+    Compatibility_Type = models.CharField(max_length=20, blank=True,null=True)
+    Dependencies = models.JSONField(default=list, blank=True)
+    Version_Constraint = models.BooleanField(default=False)
+    Minimum_Version = models.CharField(max_length=100, blank=True, default='')
+    Maximum_Version = models.CharField(max_length=100, blank=True, default='')
+    Rule_Description = models.TextField(blank=True, default='')
     Is_Active = models.BooleanField(default=True)
     Is_Deleted = models.BooleanField(default=False)
     Created_By = models.ForeignKey(UserAdmin, on_delete=models.CASCADE,related_name="Created_ProductCompatibility")
-    Created_Date = models.DateField(default=timezone.now)
+    Created_Date = models.DateField(default=timezone.localdate)
     Updated_By = models.ForeignKey(UserAdmin, on_delete=models.CASCADE,related_name="Updated_ProductCompatibility") # Need To discuss & Change
-    Updated_Date = models.DateField(default=timezone.now)
+    Updated_Date = models.DateField(default=timezone.localdate)
 
     class Meta:
         db_table = 'AddonProductCompatibility'
