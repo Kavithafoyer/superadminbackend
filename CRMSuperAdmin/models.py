@@ -708,8 +708,31 @@ class ProductCategory(models.Model):
         return self.Category_Name or ''
 
 
+def Product_Id_I():
+    Task = ProductMaster.objects.all().order_by('id').last()
+    if not Task:
+        return "P_ID" + "000000001"
+    Tasking = Task.Product_Id
+    if not Tasking:
+        return "P_ID" + "000000001"
+    try:
+        Taski = int(Tasking[3:])
+        Tas = Taski + 1
+        Configur = "P_ID" + str(Tas).zfill(9)
+        return Configur
+    except Exception:
+        import re
+        digits = re.findall(r'\d+', str(Tasking))
+        if digits:
+            Tas = int(digits[-1]) + 1
+            return "P_ID" + str(Tas).zfill(9)
+        return "P_ID" + "000000001"
+
+
+
 class ProductMaster(models.Model):
     Organization_Id = models.ForeignKey(Userorganizationmaster, on_delete=models.CASCADE, blank=True, null=True)
+    Product_Id=models.CharField(max_length=1000,unique=True,default=Product_Id_I)
     Product_Code = models.CharField(max_length=100, blank=True, null=True, unique=True)
     Product_Name = models.CharField(max_length=250, blank=True, null=True)
     Description = models.TextField(blank=True, null=True)
@@ -912,6 +935,7 @@ class Plan(models.Model):
     Updated_Date = models.DateTimeField(default=timezone.now,blank=True,null=True)
     # role = models.ForeignKey('authapp.Role', on_delete=models.SET_NULL, null=True, blank=True, related_name='plans')
     menu = models.ManyToManyField('authapp.Menu', blank=True, related_name='menus')
+    Product_Feature=models.ManyToManyField('ProductFeature',blank=True,null=True)
 
     @property
     def PlanDetails(self):

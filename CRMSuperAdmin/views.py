@@ -1383,6 +1383,38 @@ def generate_product_code():
 class ProductMasterCRUD(APIView):
     parser_classes = [MultiPartParser, FormParser, JSONParser]
 
+    @staticmethod
+    def _save_product_media_file(uploaded_file, folder_name):
+        from django.core.files.storage import default_storage
+        safe_name = os.path.basename(getattr(uploaded_file, 'name', '') or 'asset.png')
+        safe_name = re.sub(r'[^A-Za-z0-9._-]', '_', safe_name)
+        rel_path = f"{folder_name}/{uuid.uuid4().hex}_{safe_name}"
+        saved_path = default_storage.save(rel_path, uploaded_file)
+        media_url = settings.MEDIA_URL if settings.MEDIA_URL.endswith('/') else f"{settings.MEDIA_URL}/"
+        return f"{media_url}{saved_path.lstrip('/')}"
+
+    @classmethod
+    def _prepare_product_data(cls, request):
+        data = request.data.dict() if hasattr(request.data, 'dict') else request.data.copy()
+
+        for field_name, folder in (('Product_Logo', 'product_logos'), ('Product_Icon', 'product_icons')):
+            if request.FILES and field_name in request.FILES:
+                uploaded = request.FILES[field_name]
+                content_type = getattr(uploaded, 'content_type', '') or ''
+                ext = os.path.splitext(getattr(uploaded, 'name', '') or '')[1].lower()
+                allowed_exts = ('.png', '.jpg', '.jpeg', '.svg', '.webp', '.gif', '.ico')
+                if not content_type.startswith('image/') and ext not in allowed_exts:
+                    raise ValueError(f"{field_name} must be an image file.")
+                data[field_name] = cls._save_product_media_file(uploaded, folder)
+
+        if 'Release_Date' in data and str(data.get('Release_Date') or '').strip().lower() in ('', 'null', 'none'):
+            data['Release_Date'] = None
+
+        if 'Is_Active' in data and isinstance(data['Is_Active'], str):
+            data['Is_Active'] = data['Is_Active'].strip().lower() in ('true', '1', 'yes')
+
+        return data
+
     def get(self, request, *args, **kwargs):
         try:
             pk = request.GET.get('id')
@@ -1413,10 +1445,13 @@ class ProductMasterCRUD(APIView):
 
     def post(self, request, *args, **kwargs):
         try:
-            data = request.data.dict() if hasattr(request.data, 'dict') else request.data.copy()
+            data = self._prepare_product_data(request)
             if not data:
                 return HttpResponse(JSONRenderer().render({"Error": "Payload cannot be empty"}),
                                     content_type='application/json', status=status.HTTP_400_BAD_REQUEST)
+
+            if str(data.get('id') or '').strip() in ('', 'null', 'None'):
+                data.pop('id', None)
 
             # Fallback for Organization_Id if missing
             if not data.get('Organization_Id'):
@@ -1453,7 +1488,7 @@ class ProductMasterCRUD(APIView):
 
     def put(self, request, *args, **kwargs):
         try:
-            data = request.data.dict() if hasattr(request.data, 'dict') else request.data.copy()
+            data = self._prepare_product_data(request)
             if not data:
                 return HttpResponse(JSONRenderer().render({"Error": "Payload cannot be empty"}),
                                     content_type='application/json', status=status.HTTP_400_BAD_REQUEST)
