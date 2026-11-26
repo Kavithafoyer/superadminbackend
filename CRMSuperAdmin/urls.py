@@ -465,6 +465,9 @@ path('AddonPriceTemplateListwithPagination/',AddonPriceTemplateListwithPaginatio
 path('AddonPriceTemplateSearch/',AddonPriceTemplateSearch.as_view()),
 path('AddonPriceTemplatelistwithoutpaginaton/',AddonPriceTemplatelistwithoutpaginaton.as_view()),
 path('AddonPriceTemplateFilter/',AddonPriceTemplateFilter.as_view()),
+path('AddonPriceTemplateKPI/',AddonPriceTemplateKPIAPI.as_view()),
+path('AddonPriceTemplateExport/',AddonPriceTemplateExportAPI.as_view()),
+path('AddonPriceTemplateExportAPI/',AddonPriceTemplateExportAPI.as_view()),
 
 
 path('AddonPricingCRUD/',AddonPricingCRUD.as_view()),
@@ -472,24 +475,37 @@ path('AddonPricingListwithPagination/',AddonPricingListwithPagination.as_view())
 path('AddonPricingSearch/',AddonPricingSearch.as_view()),
 path('AddonPricinglistwithoutpaginaton/',AddonPricinglistwithoutpaginaton.as_view()),
 path('AddonPricingFilter/',AddonPricingFilter.as_view()),
+path('AddonPricingKPI/',AddonPricingKPIAPI.as_view()),
+path('AddonPricingExport/',AddonPricingExportAPI.as_view()),
+path('AddonPricingExportAPI/',AddonPricingExportAPI.as_view()),
 
 
 path('AddonTieredPricingCRUD/',AddonTieredPricingCRUD.as_view()),
 path('AddonTieredPricingListwithPagination/',AddonTieredPricingListwithPagination.as_view()),
 path('AddonTieredPricinglistwithoutpaginaton/',AddonTieredPricinglistwithoutpaginaton.as_view()),
 path('AddonTieredPricingFilter/',AddonTieredPricingFilter.as_view()),
+path('AddonTieredPricingSearch/',AddonTieredPricingSearch.as_view()),
+path('AddonTieredPricingKPI/',AddonTieredPricingKPIAPI.as_view()),
+path('AddonTieredPricingExport/',AddonTieredPricingExportAPI.as_view()),
 
 
+path('AddonDiscountCouponOptions/', AddonDiscountCouponOptions.as_view()),
 path('AddonDiscountCouponCRUD/',AddonDiscountCouponCRUD.as_view()),
 path('AddonDiscountCouponListwithPagination/',AddonDiscountCouponListwithPagination.as_view()),
 path('AddonDiscountCouponlistwithoutpaginaton/',AddonDiscountCouponlistwithoutpaginaton.as_view()),
 path('AddonDiscountCouponFilter/',AddonDiscountCouponFilter.as_view()),
+path('AddonDiscountCouponSearch/',AddonDiscountCouponSearch.as_view()),
+path('AddonDiscountCouponKPI/',AddonDiscountCouponKPIAPI.as_view()),
+path('AddonDiscountCouponExport/',AddonDiscountCouponExportAPI.as_view()),
 
 
 path('AddonPriceHistoryCRUD/',AddonPriceHistoryCRUD.as_view()),
 path('AddonPriceHistoryListwithPagination/',AddonPriceHistoryListwithPagination.as_view()),
 path('AddonPriceHistorylistwithoutpaginaton/',AddonPriceHistorylistwithoutpaginaton.as_view()),
 path('AddonPriceHistoryFilter/',AddonPriceHistoryFilter.as_view()),
+path('AddonPriceHistorySearch/',AddonPriceHistorySearch.as_view()),
+path('AddonPriceHistoryKPI/',AddonPriceHistoryKPIAPI.as_view()),
+path('AddonPriceHistoryExport/',AddonPriceHistoryExportAPI.as_view()),
 
 
 

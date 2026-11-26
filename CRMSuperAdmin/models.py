@@ -364,14 +364,24 @@ def AddonDiscountCoupon_I():
 
 
 def AddonPriceHistory_I():
-    Task= AddonPriceHistory.objects.all().order_by('id').last()
+    Task = AddonPriceHistory.objects.all().order_by('id').last()
     if not Task:
         return "APH" + "000000001"
-    Tasking = Task. AddonPriceHistory_Id
-    Taski=int(Tasking[3:])
-    Tas= Taski + 1
-    Configur = "APH" + str(Tas).zfill(9)
-    return Configur
+    Tasking = Task.AddonPriceHistory_Id
+    if not Tasking:
+        return "APH" + "000000001"
+    try:
+        Taski = int(Tasking[3:])
+        Tas = Taski + 1
+        Configur = "APH" + str(Tas).zfill(9)
+        return Configur
+    except Exception:
+        import re
+        digits = re.findall(r'\d+', str(Tasking))
+        if digits:
+            Tas = int(digits[-1]) + 1
+            return "APH" + str(Tas).zfill(9)
+        return "APH" + "000000001"
 
 
 
@@ -534,15 +544,20 @@ class AddonPriceTemplate(models.Model):
     AddonPriceTemplate_Id = models.CharField(max_length=50,unique=True,default=AddonPriceTemplate_I)   
     Template_Code = models.CharField(max_length=50, unique=True)
     Template_Name = models.CharField(max_length=150)
+    Description = models.TextField(blank=True, default='')
+    Tiers = models.JSONField(default=list, blank=True)
+    Discount_Percentage = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
+    Show_For_New_Addons = models.BooleanField(default=False)
+    Allow_Customization = models.BooleanField(default=False)
     Billing_Type = models.CharField(max_length=100,blank=True,null=True)
     Billing_Cycle = models.CharField(max_length=100,blank=True,null=True)
     Currency = models.CharField(max_length=10, default='INR')
     Is_Active = models.BooleanField(default=True)
     Is_Deleted = models.BooleanField(default=False)
     Created_By = models.ForeignKey(UserAdmin, on_delete=models.CASCADE,related_name="Created_AddonPriceTemplate")
-    Created_Date = models.DateField(default=timezone.now)
+    Created_Date = models.DateField(default=date.today, blank=True, null=True)
     Updated_By = models.ForeignKey(UserAdmin, on_delete=models.CASCADE,related_name="Updated_AddonPriceTemplate") # Need To discuss & Change
-    Updated_Date = models.DateField(default=timezone.now)
+    Updated_Date = models.DateField(default=date.today, blank=True, null=True)
 
 
     class Meta:
@@ -558,15 +573,17 @@ class AddonPricing(models.Model):
     Price_Template = models.ForeignKey('AddonPriceTemplate', on_delete=models.CASCADE, related_name='AddonPrices')
     Addon_Name = models.CharField(max_length=250, blank=True, null=True)
     Price_Template_Name = models.CharField(max_length=250, blank=True, null=True)
+    Pricing_Options = models.JSONField(default=dict, blank=True)
+    Tier_Schedule = models.JSONField(default=dict, blank=True)
     Base_Price = models.DecimalField(max_digits=12, decimal_places=2)
-    Effective_From = models.DateField(default=timezone.now)
+    Effective_From = models.DateField(default=date.today, blank=True, null=True)
     Effective_To = models.DateField(blank=True, null=True)
     Is_Active = models.BooleanField(default=True)
     Is_Deleted = models.BooleanField(default=False)
     Created_By = models.ForeignKey(UserAdmin, on_delete=models.CASCADE,related_name="Created_AddonPricing")
-    Created_Date = models.DateField(default=timezone.now)
+    Created_Date = models.DateField(default=date.today, blank=True, null=True)
     Updated_By = models.ForeignKey(UserAdmin, on_delete=models.CASCADE,related_name="Updated_AddonPricing") # Need To discuss & Change
-    Updated_Date = models.DateField(default=timezone.now)
+    Updated_Date = models.DateField(default=date.today, blank=True, null=True)
 
     class Meta:
         db_table = 'AddonPricing'
@@ -577,15 +594,17 @@ class AddonPricing(models.Model):
 class AddonTieredPricing(models.Model):
     AddonTieredPricing_Id = models.CharField(max_length=50,unique=True,default=AddonTieredPricing_I)   
     Addon_Pricing = models.ForeignKey('AddonPricing', on_delete=models.CASCADE, related_name='Tiers')
+    Name = models.CharField(max_length=100, blank=True, default='')
+    Rate_Details = models.JSONField(default=dict, blank=True)
     Min_Employees = models.PositiveIntegerField()
     Max_Employees = models.PositiveIntegerField()
     Tier_Price = models.DecimalField(max_digits=12, decimal_places=2)
     Is_Active = models.BooleanField(default=True)
     Is_Deleted = models.BooleanField(default=False, blank=True, null=True)
     Created_By = models.ForeignKey(UserAdmin, on_delete=models.CASCADE, related_name='Created_TieredPricing', blank=True, null=True)
-    Created_Date = models.DateTimeField(default=timezone.now, blank=True, null=True)
+    Created_Date = models.DateTimeField(default=date.today, blank=True, null=True)
     Updated_By = models.ForeignKey(UserAdmin, on_delete=models.CASCADE, related_name='updateTieredPricing', blank=True, null=True)
-    Updated_Date = models.DateTimeField(default=timezone.now, blank=True, null=True)
+    Updated_Date = models.DateTimeField(default=date.today, blank=True, null=True)
 
     class Meta:
         db_table = 'AddonTieredPricing'
@@ -600,6 +619,13 @@ class AddonTieredPricing(models.Model):
 # 7. DISCOUNTS & COUPONS
 
 class AddonDiscountCoupon(models.Model):
+    Name = models.CharField(max_length=150, blank=True, default='')
+    Kind = models.CharField(max_length=10, choices=[('Discount', 'Discount'), ('Coupon', 'Coupon')], default='Coupon')
+    Applicability = models.CharField(max_length=15, choices=[('Subscription', 'Subscription'), ('Add-on', 'Add-on'), ('All', 'All')], default='Add-on')
+    Scope = models.CharField(max_length=15, choices=[('All', 'All'), ('New', 'New'), ('Existing', 'Existing')], default='All')
+    Applicable_Products = models.ManyToManyField('ProductMaster', blank=True, related_name='DiscountCoupons')
+    Applicable_Plans = models.ManyToManyField('Plan', blank=True, related_name='DiscountCoupons')
+    Per_Customer_Limit = models.PositiveIntegerField(blank=True, null=True)
     AddonDiscountCoupon_Id = models.CharField(max_length=50,unique=True,default=AddonDiscountCoupon_I)   
     Coupon_Code = models.CharField(max_length=50, unique=True)
     Discount_Type = models.CharField(max_length=100,blank=True,null=True)
@@ -611,9 +637,9 @@ class AddonDiscountCoupon(models.Model):
     Is_Active = models.BooleanField(default=True)
     Is_Deleted = models.BooleanField(default=False, blank=True, null=True)
     Created_By = models.ForeignKey(UserAdmin, on_delete=models.CASCADE, related_name='Created_Discount', blank=True, null=True)
-    Created_Date = models.DateTimeField(default=timezone.now, blank=True, null=True)
+    Created_Date = models.DateTimeField(default=date.today, blank=True, null=True)
     Updated_By = models.ForeignKey(UserAdmin, on_delete=models.CASCADE, related_name='updateDiscount', blank=True, null=True)
-    Updated_Date = models.DateTimeField(default=timezone.now, blank=True, null=True)
+    Updated_Date = models.DateTimeField(default=date.today, blank=True, null=True)
 
 
     class Meta:
@@ -627,8 +653,9 @@ class AddonPriceHistory(models.Model):
     Addon_Pricing = models.ForeignKey('AddonPricing', on_delete=models.PROTECT, related_name='PriceHistory')
     Old_Base_Price = models.DecimalField(max_digits=12, decimal_places=2)
     New_Base_Price = models.DecimalField(max_digits=12, decimal_places=2)
+    Reason = models.TextField(blank=True, null=True)
     Changed_By = models.ForeignKey(UserAdmin, on_delete=models.CASCADE, related_name='Created_PriceHistory', blank=True, null=True)
-    Change_Date = models.DateTimeField(default=timezone.now)
+    Change_Date = models.DateTimeField(default=date.today, blank=True, null=True)
     Is_Deleted = models.BooleanField(default=False, blank=True, null=True)
    
     class Meta:
@@ -672,9 +699,9 @@ class ProductCategory(models.Model):
     Is_Active = models.BooleanField(default=True, blank=True, null=True)
     Is_Deleted = models.BooleanField(default=False, blank=True, null=True)
     Created_By = models.ForeignKey(UserAdmin, on_delete=models.CASCADE, related_name='created_product_category_set', blank=True, null=True)
-    Created_Date = models.DateTimeField(default=timezone.now, blank=True, null=True)
+    Created_Date = models.DateTimeField(default=date.today, blank=True, null=True)
     Updated_By = models.ForeignKey(UserAdmin, on_delete=models.CASCADE, related_name='updated_product_category_set', blank=True, null=True)
-    Updated_Date = models.DateTimeField(default=timezone.now, blank=True, null=True)
+    Updated_Date = models.DateTimeField(default=date.today, blank=True, null=True)
 
     class Meta:
         db_table = 'ProductCategory'
@@ -716,9 +743,9 @@ class ProductMaster(models.Model):
     Is_Active = models.BooleanField(default=True, blank=True, null=True)
     Is_Deleted = models.BooleanField(default=False, blank=True, null=True)
     Created_By = models.ForeignKey(UserAdmin, on_delete=models.CASCADE, related_name='created_product_master_set', blank=True, null=True)
-    Created_Date = models.DateTimeField(default=timezone.now, blank=True, null=True)
+    Created_Date = models.DateTimeField(default=date.today, blank=True, null=True)
     Updated_By = models.ForeignKey(UserAdmin, on_delete=models.CASCADE, related_name='updated_product_master_set', blank=True, null=True)
-    Updated_Date = models.DateTimeField(default=timezone.now, blank=True, null=True)
+    Updated_Date = models.DateTimeField(default=date.today, blank=True, null=True)
 
     @property
     def Product_Id(self):
