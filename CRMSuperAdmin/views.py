@@ -1543,6 +1543,142 @@ class ProductMasterListAPI(ListAPIView):
         return queryset
 
 
+def _filter_product_master_queryset(data):
+    queryset = ProductMaster.objects.filter(Is_Deleted=False).order_by('-id')
+
+    search = str(data.get('search') or data.get('q') or '').strip()
+    if search:
+        queryset = queryset.filter(
+            Q(Product_Name__icontains=search)
+            | Q(Product_Code__icontains=search)
+            | Q(Category__icontains=search)
+            | Q(Description__icontains=search)
+            | Q(Lifecycle_stage__icontains=search)
+        )
+
+    name = str(data.get('Product_Name') or '').strip()
+    if name:
+        queryset = queryset.filter(Product_Name__icontains=name)
+
+    code = str(data.get('Product_Code') or '').strip()
+    if code:
+        queryset = queryset.filter(Product_Code__icontains=code)
+
+    category = str(data.get('Category') or data.get('category') or '').strip()
+    if category and category.lower() not in ('all', 'all categories'):
+        queryset = queryset.filter(Category__iexact=category)
+
+    status_val = str(data.get('Status') or data.get('status') or '').strip()
+    if status_val and status_val.lower() not in ('all', 'all status'):
+        if status_val.lower() == 'active':
+            queryset = queryset.filter(
+                Q(Status__iexact='Active')
+                | (Q(Status__isnull=True) & Q(Is_Active=True))
+                | (Q(Status='') & Q(Is_Active=True))
+            )
+        elif status_val.lower() == 'inactive':
+            queryset = queryset.filter(
+                Q(Status__iexact='Inactive') | Q(Is_Active=False)
+            )
+        else:
+            queryset = queryset.filter(Status__iexact=status_val)
+
+    lifecycle = str(data.get('Lifecycle_stage') or data.get('lifecycle_stage') or '').strip()
+    if lifecycle and lifecycle.lower() != 'all':
+        queryset = queryset.filter(Lifecycle_stage__iexact=lifecycle)
+
+    if data.get('Is_Active') is not None:
+        is_active = str(data.get('Is_Active')).lower() in ('true', '1')
+        queryset = queryset.filter(Is_Active=is_active)
+
+    ids_raw = data.get('ids')
+    if ids_raw:
+        if isinstance(ids_raw, list):
+            selected_ids = [int(i) for i in ids_raw if str(i).strip().isdigit()]
+        else:
+            selected_ids = [int(i) for i in str(ids_raw).split(',') if i.strip().isdigit()]
+        if selected_ids:
+            queryset = queryset.filter(id__in=selected_ids)
+
+    fromdate = data.get('fromdate')
+    todate = data.get('todate')
+    if fromdate and todate:
+        queryset = queryset.filter(Created_Date__date__range=[fromdate, todate])
+
+    return queryset
+
+
+class ProductMasterFilterAPI(APIView):
+    def get(self, request, *args, **kwargs):
+        return self._filter(request, request.query_params)
+
+    def post(self, request, *args, **kwargs):
+        return self._filter(request, request.data)
+
+    def _filter(self, request, data):
+        try:
+            queryset = _filter_product_master_queryset(data)
+            serializer = ProductMasterSerializer(queryset, many=True, context={'request': request})
+            return HttpResponse(JSONRenderer().render(serializer.data), content_type='application/json', status=status.HTTP_200_OK)
+        except Exception as e:
+            return HttpResponse(JSONRenderer().render({"Error": str(e)}), content_type='application/json', status=status.HTTP_400_BAD_REQUEST)
+
+
+class ProductMasterExportAPI(APIView):
+    def perform_content_negotiation(self, request, force=False):
+        renderers = self.get_renderers()
+        return renderers[0], renderers[0].media_type
+
+    def get(self, request, *args, **kwargs):
+        return self._export(request.query_params)
+
+    def post(self, request, *args, **kwargs):
+        return self._export(request.data)
+
+    def _export(self, data):
+        try:
+            import csv, io
+            queryset = _filter_product_master_queryset(data)
+            output = io.StringIO()
+            output.write('\ufeff')
+            writer = csv.writer(output)
+            writer.writerow([
+                "Product Code",
+                "Product Name",
+                "Category",
+                "Status",
+                "Lifecycle Stage",
+                "Current Version",
+                "Release Date",
+                "Short Description",
+                "Active",
+                "Created Date",
+            ])
+
+            for p in queryset:
+                effective_status = p.Status or ("Active" if p.Is_Active is not False else "Inactive")
+                release_str = p.Release_Date.strftime("%Y-%m-%d") if p.Release_Date else ""
+                created_str = p.Created_Date.strftime("%Y-%m-%d") if p.Created_Date else ""
+                writer.writerow([
+                    p.Product_Code or "",
+                    p.Product_Name or "",
+                    p.Category or "",
+                    effective_status,
+                    p.Lifecycle_stage or "",
+                    p.Current_version or "",
+                    release_str,
+                    p.Description or "",
+                    "Yes" if p.Is_Active is not False else "No",
+                    created_str,
+                ])
+
+            response = HttpResponse(output.getvalue(), content_type="text/csv; charset=utf-8")
+            response["Content-Disposition"] = 'attachment; filename="product_master_export.csv"'
+            return response
+        except Exception as e:
+            return HttpResponse(JSONRenderer().render({"Error": str(e)}), content_type="application/json", status=status.HTTP_400_BAD_REQUEST)
+
+
 class ProductMasterLookupsAPIView(APIView):
     def get(self, request, *args, **kwargs):
         try:
