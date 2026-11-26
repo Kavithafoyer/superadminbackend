@@ -1816,10 +1816,13 @@ class AddonAdditional(ListAPIView):
     def get_queryset(self):
         try:
             val = self.request.GET.get('Is_Deleted')
+            qs = AddonMaster.objects.select_related(
+                'Addon_Category', 'Organization_Id', 'Created_By', 'Updated_By'
+            ).prefetch_related('Products', 'Plans')
             if val is not None:
                 is_deleted = val.lower() in ('true', '1')
-                return AddonMaster.objects.filter(Is_Deleted=is_deleted).order_by('-id')
-            return AddonMaster.objects.filter(Is_Deleted=False).order_by('-id')
+                return qs.filter(Is_Deleted=is_deleted).order_by('-id')
+            return qs.filter(Is_Deleted=False).order_by('-id')
         except Exception:
             return AddonMaster.objects.filter(Is_Deleted=False).order_by('-id')
 
@@ -3711,7 +3714,27 @@ class InvoiceFullList(ListAPIView):
     def get(self, request, *args, **kwargs):
         try:
             data = request.query_params
-            module = Invoice.objects.filter(Is_Deleted=False).order_by('-id')
+            module = (
+                Invoice.objects.filter(Is_Deleted=False)
+                .select_related(
+                    'Organization_Id',
+                    'Subscription_Id',
+                    'Subscription_Id__Plan_Id',
+                    'Subscription_Id__Customer_Id',
+                    'Product_Id',
+                    'Customer_Id',
+                    'Created_By',
+                    'Updated_By',
+                )
+                .prefetch_related(
+                    'items',
+                    'items__Product_Id',
+                    'items__Plan_Id',
+                    'Subscriptions',
+                    'Products',
+                )
+                .order_by('-id')
+            )
             customer_id = data.get('customer_id') or data.get('Customer_Id')
             search = data.get('search')
             if customer_id and str(customer_id).lower() != 'all':
@@ -3749,7 +3772,12 @@ class AddonsFullList(ListAPIView):
     def get(self, request, *args, **kwargs):
         data=request.query_params
         db=self.request.headers
-        module = AddonMaster.objects.filter(Is_Deleted=False).order_by('-id')
+        module = (
+            AddonMaster.objects.filter(Is_Deleted=False)
+            .select_related('Addon_Category', 'Organization_Id', 'Created_By', 'Updated_By')
+            .prefetch_related('Products', 'Plans')
+            .order_by('-id')
+        )
         module = filter_by_product(module, request)
         serilizer=Addonserializer(module,many=True)
         output=JSONRenderer().render(serilizer.data)
@@ -4357,7 +4385,12 @@ class AccountFullList(ListAPIView):
         data=request.query_params
         db=self.request.headers
         customer_id = data.get('customer_id') or data.get('Account_Id') or data.get('id')
-        module = Account.objects.filter(Is_Deleted=False).order_by('-id')
+        module = (
+            Account.objects.filter(Is_Deleted=False)
+            .select_related('Organization_Id', 'Product_Id', 'Partner_Id', 'Created_By', 'Updated_By')
+            .prefetch_related('documents')
+            .order_by('-id')
+        )
         if customer_id and str(customer_id).lower() != 'all':
             clean_cid = str(customer_id).strip()
             if clean_cid.isdigit():
@@ -4509,6 +4542,178 @@ class CSVStreamRenderer(BaseRenderer):
         return data
 
 
+def _load_account_contract_maps(accounts):
+    """Batch-load Subscriptions and latest Renewal records for an Account list."""
+    account_ids = [acc.id for acc in accounts if acc.id is not None]
+    subs_by_customer = {}
+    renewals_by_customer = {}
+    if not account_ids:
+        return subs_by_customer, renewals_by_customer
+
+    for sub in (
+        Subscriptions.objects.select_related('Product_Id', 'Plan_Id')
+        .prefetch_related('Addtionaluser_Id')
+        .filter(Customer_Id_id__in=account_ids, Is_Deleted=False)
+        .exclude(Is_Archived=True)
+        .order_by('-id')
+    ):
+        if sub.Customer_Id_id:
+            subs_by_customer.setdefault(sub.Customer_Id_id, []).append(sub)
+
+    for ren in (
+        Renewal.objects.select_related('Product_Id')
+        .filter(Customer_Id_id__in=account_ids, Is_Deleted=False)
+        .order_by('-id')
+    ):
+        if ren.Customer_Id_id and ren.Customer_Id_id not in renewals_by_customer:
+            renewals_by_customer[ren.Customer_Id_id] = ren
+
+    return subs_by_customer, renewals_by_customer
+
+
+def _derive_account_contract_summary(acc, subs_by_customer, renewals_by_customer, today):
+    """Derive ARR, seats, product, plan, renewal date, and status from Subscriptions/Renewals/Account."""
+    thirty_days_later = today + timedelta(days=30)
+    cust_subs = subs_by_customer.get(acc.id, [])
+    active_subs = [
+        s for s in cust_subs
+        if 'active' in (s.status or '').lower() and 'inactive' not in (s.status or '').lower()
+    ]
+    primary_sub = active_subs[0] if active_subs else (cust_subs[0] if cust_subs else None)
+    latest_ren = renewals_by_customer.get(acc.id)
+
+    arr_val = 0.0
+    for s in active_subs:
+        amt = float(s.SuscriptionAmount or 0.0)
+        if amt <= 0 or s.is_trial:
+            continue
+        period = (s.SubscriptionPeriod or '').strip().lower()
+        cycle = (
+            s.Plan_Id.billing_cycle if s.Plan_Id and s.Plan_Id.billing_cycle else ''
+        ).strip().lower()
+        if 'year' in period or 'annual' in period or 'year' in cycle:
+            arr_val += amt
+        else:
+            arr_val += amt * 12.0
+
+    licensed_seats = 0
+    for s in (active_subs or ([primary_sub] if primary_sub else [])):
+        base_users = s.Base_Users or 0
+        if base_users == 0 and s.Plan_Id and s.Plan_Id.No_Of_Users:
+            base_users = s.Plan_Id.No_Of_Users
+        additional_users = s.Additional_users or 0
+        addon_pack_users = sum(
+            (item.No_Of_Users or 0)
+            for item in s.Addtionaluser_Id.all()
+            if not item.Is_Deleted
+        )
+        licensed_seats += base_users + additional_users + addon_pack_users
+
+    raw_status = (
+        getattr(acc, 'Client_Status', None)
+        or getattr(acc, 'Status_Flag', None)
+        or (primary_sub.status if primary_sub else '')
+        or ''
+    ).strip().lower()
+    ren_status = (latest_ren.Renewal_Status or '').strip().lower() if latest_ren else ''
+    ren_pay = (latest_ren.Payment_Status or '').strip().lower() if latest_ren else ''
+    sub_pay = (primary_sub.Last_Payment_Status or '').strip().lower() if primary_sub else ''
+    sub_status_lower = (primary_sub.status or '').strip().lower() if primary_sub else ''
+    renewal_date = (
+        (primary_sub.Next_Renewal_Date or primary_sub.Renewal_Date or primary_sub.end_date)
+        if primary_sub
+        else None
+    )
+
+    if (
+        'overdue' in raw_status
+        or 'overdue' in ren_status
+        or 'overdue' in ren_pay
+        or 'overdue' in sub_pay
+        or 'failed' in sub_pay
+    ):
+        status_name = 'Overdue'
+    elif (
+        'expir' in raw_status
+        or 'expir' in ren_status
+        or 'inact' in raw_status
+        or 'cancel' in raw_status
+        or 'expired' in sub_status_lower
+        or 'cancelled' in sub_status_lower
+    ):
+        status_name = 'Expiring'
+    elif renewal_date:
+        if renewal_date < today:
+            status_name = 'Overdue'
+        elif today <= renewal_date <= thirty_days_later:
+            status_name = 'Expiring'
+        else:
+            status_name = 'Active'
+    elif acc.Active_Flag is False and not active_subs:
+        status_name = 'Expiring'
+    else:
+        status_name = 'Active'
+
+    prod_name = ''
+    if primary_sub and primary_sub.Product_Id:
+        prod_name = (
+            primary_sub.Product_Id.Product_Name
+            or primary_sub.Product_Id.Product_Code
+            or ''
+        ).strip()
+    if not prod_name and acc.Product_Id:
+        prod_name = (acc.Product_Id.Product_Name or acc.Product_Id.Product_Code or '').strip()
+    if not prod_name and latest_ren:
+        if latest_ren.Product_Id:
+            prod_name = (latest_ren.Product_Id.Product_Name or '').strip()
+        if not prod_name:
+            prod_name = (latest_ren.Producttype or '').strip()
+
+    plan_name = ''
+    if primary_sub:
+        plan_name = (
+            primary_sub.Plan_Name
+            or (primary_sub.Plan_Id.Plan_Name if primary_sub.Plan_Id else '')
+            or ''
+        ).strip()
+    if not plan_name and latest_ren and latest_ren.RequestedPlan_Id:
+        plan_name = (latest_ren.RequestedPlan_Id.Plan_Name or '').strip()
+
+    return {
+        'arr': arr_val,
+        'licensed_seats': licensed_seats,
+        'status': status_name,
+        'product': prod_name,
+        'plan': plan_name,
+        'next_renewal': renewal_date,
+    }
+
+
+def _filter_accounts_by_product(qs, product_filter):
+    """Filter an Account queryset by product name, code, ID, or linked Subscriptions."""
+    sub_match_qs = Subscriptions.objects.filter(Is_Deleted=False).exclude(Is_Archived=True)
+    if product_filter.isdigit():
+        pid = int(product_filter)
+        matching_sub_ids = set(
+            sub_match_qs.filter(Product_Id_id=pid).values_list('Customer_Id_id', flat=True)
+        )
+        return qs.filter(Q(Product_Id_id=pid) | Q(id__in=matching_sub_ids))
+
+    matching_sub_ids = set(
+        sub_match_qs.filter(
+            Q(Product_Id__Product_Name__icontains=product_filter)
+            | Q(Product_Id__Product_Code__icontains=product_filter)
+            | Q(Plan_Name__icontains=product_filter)
+        ).values_list('Customer_Id_id', flat=True)
+    )
+    return qs.filter(
+        Q(Product_Id__Product_Name__icontains=product_filter)
+        | Q(Product_Id__Product_Code__icontains=product_filter)
+        | Q(Industry__icontains=product_filter)
+        | Q(id__in=matching_sub_ids)
+    )
+
+
 class AccountExportAPI(APIView):
     authentication_classes = [JWTAuthentication]
     permission_classes = [IsAuthenticated]
@@ -4533,25 +4738,36 @@ class AccountExportAPI(APIView):
         try:
             # 1. Read query parameters from request URL
             data = request.query_params
+            customer_id = (data.get('customer_id') or data.get('Account_Id') or '').strip()
             search = data.get('search', '').strip()
-            product = data.get('Primary_Product', '').strip()
-            status_val = data.get('Account_Status', '').strip()
+            product = (data.get('Primary_Product') or data.get('product') or '').strip()
+            status_val = (data.get('Account_Status') or data.get('status') or '').strip()
             selected_ids = data.get('ids', '').strip()
 
             # 2. Base Query (Active non-deleted accounts, newest first)
-            module = Account.objects.filter(Is_Deleted=False).order_by('-id')
+            module = Account.objects.select_related('Product_Id').filter(Is_Deleted=False).order_by('-id')
 
             # 3. Apply Selective Filters
             if selected_ids:
-                # User selected specific checkbox rows to export
-                id_list = [i.strip() for i in selected_ids.split(',') if i.strip()]
-                module = module.filter(id__in=id_list)
+                raw_ids = [i.strip() for i in selected_ids.split(',') if i.strip()]
+                int_ids = [int(i) for i in raw_ids if i.isdigit()]
+                code_ids = [i for i in raw_ids if not i.isdigit()]
+                id_q = Q()
+                if int_ids:
+                    id_q |= Q(id__in=int_ids)
+                if code_ids:
+                    id_q |= Q(Account_Id__in=code_ids)
+                if id_q:
+                    module = module.filter(id_q)
             else:
-                if product and product != 'All Products':
-                    module = module.filter(Primary_Product__icontains=product)
+                if customer_id and customer_id.lower() != 'all':
+                    if customer_id.isdigit():
+                        module = module.filter(Q(id=int(customer_id)) | Q(Account_Id__iexact=customer_id))
+                    else:
+                        module = module.filter(Q(Account_Id__iexact=customer_id) | Q(Organization_Name__icontains=customer_id))
 
-                if status_val and status_val != 'All':
-                    module = module.filter(Account_Status__iexact=status_val)
+                if product and product.lower() != 'all products':
+                    module = _filter_accounts_by_product(module, product)
 
                 if search:
                     module = module.filter(
@@ -4562,11 +4778,16 @@ class AccountExportAPI(APIView):
                         Q(Mail__icontains=search) |
                         Q(Industry__icontains=search) |
                         Q(City__icontains=search) |
-                        Q(Location__icontains=search)
+                        Q(Location__icontains=search) |
+                        Q(Product_Id__Product_Name__icontains=search)
                     )
 
+            accounts = list(module)
+            subs_by_customer, renewals_by_customer = _load_account_contract_maps(accounts)
+            today = timezone.now().date()
+
             # 4. Configure HTTP CSV response with timestamped filename
-            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            timestamp = timezone.now().strftime('%Y%m%d_%H%M%S')
             filename = f"customers_export_{timestamp}.csv"
 
             response = HttpResponse(content_type='text/csv; charset=utf-8')
@@ -4598,26 +4819,40 @@ class AccountExportAPI(APIView):
                 'Customer Since'
             ])
 
-            # 6. Stream rows from database using chunked iterator
-            for acc in module.iterator(chunk_size=1000):
+            # 6. Write enriched customer rows
+            for acc in accounts:
+                summary = _derive_account_contract_summary(
+                    acc, subs_by_customer, renewals_by_customer, today
+                )
+                if not selected_ids and status_val and status_val.lower() != 'all':
+                    if summary['status'].lower() != status_val.lower():
+                        continue
+
+                arr_num = summary['arr']
+                arr_display = int(round(arr_num)) if arr_num == int(arr_num) else round(arr_num, 2)
+                next_renewal_str = (
+                    summary['next_renewal'].strftime('%Y-%m-%d')
+                    if summary['next_renewal']
+                    else ''
+                )
                 writer.writerow([
                     acc.Account_Id or (f"ACC-{acc.id}" if acc.id else ''),
                     acc.Organization_Name or '',
                     acc.Industry or '',
-                    acc.Primary_Product or '',
-                    acc.Subscribed_Plan or '',
-                    acc.Annual_Contract_ARR or '0',
-                    acc.Licensed_User_Seats or '0',
-                    acc.Account_Status or 'Active',
-                    acc.Next_Renewal.strftime('%Y-%m-%d') if acc.Next_Renewal else '',
+                    summary['product'] or acc.Industry or '',
+                    summary['plan'] or '',
+                    arr_display,
+                    summary['licensed_seats'],
+                    summary['status'],
+                    next_renewal_str,
                     acc.Contact_Name or '',
                     acc.Phone_Number or '',
                     acc.Mail or '',
                     acc.Location or '',
                     acc.City or '',
                     acc.Account_Owner or '',
-                    acc.SLA_Tier or '',
-                    acc.Created_Date.strftime('%Y-%m-%d') if hasattr(acc, 'Created_Date') and acc.Created_Date else ''
+                    acc.Client_Type or '',
+                    acc.Created_Date.strftime('%Y-%m-%d') if getattr(acc, 'Created_Date', None) else ''
                 ])
 
             return response
@@ -4636,7 +4871,7 @@ class AccountExportAPI(APIView):
 #      - total_customers: Total active (non-deleted) registered accounts in DB
 #      - active_customers: Currently operational accounts with live contracts
 #      - expiring_customers: Accounts expiring within next 30 days or marked expiring
-#      - overdue_customers: Accounts with past Next_Renewal or overdue status
+#      - overdue_customers: Accounts with past renewal dates or overdue status
 #      - total_arr: Exact numeric total Annual Recurring Revenue in INR
 #      - formatted_arr: Human-readable currency string (e.g. ₹1.16 Cr or ₹45.5 L)
 #      - active_pct / expiring_pct / overdue_pct: Proportion percentages
@@ -4657,29 +4892,27 @@ class CustomerKpiAnalyticsAPI(APIView):
 
     def get(self, request, *args, **kwargs):
         try:
-            # 1. Read optional product filter from query params
-            product_filter = request.query_params.get('product') or request.query_params.get('Primary_Product', '')
-            product_filter = product_filter.strip()
+            product_filter = (
+                request.query_params.get('product')
+                or request.query_params.get('Primary_Product')
+                or request.query_params.get('product_id')
+                or ''
+            ).strip()
 
-            # 2. Base Queryset: Non-deleted accounts
-            qs = Account.objects.filter(Is_Deleted=False)
-
+            qs = Account.objects.select_related('Product_Id').filter(Is_Deleted=False)
             if product_filter and product_filter.lower() != 'all products':
-                qs = qs.filter(
-                    Q(Primary_Product__icontains=product_filter) |
-                    Q(Product_Id__Product_Name__icontains=product_filter)
-                )
+                qs = _filter_accounts_by_product(qs, product_filter)
 
-            total_customers = qs.count()
+            accounts = list(qs)
+            total_customers = len(accounts)
+            subs_by_customer, renewals_by_customer = _load_account_contract_maps(accounts)
             today = timezone.now().date()
-            thirty_days_later = today + timedelta(days=30)
 
             active_count = 0
             expiring_count = 0
             overdue_count = 0
             total_arr = 0.0
 
-            # Dynamic dictionary to track active accounts by product
             product_counts = {
                 'Education': 0,
                 'IT Services': 0,
@@ -4688,46 +4921,17 @@ class CustomerKpiAnalyticsAPI(APIView):
                 'People (HRMS)': 0,
             }
 
-            for acc in qs:
-                # Calculate ARR: clean formatting symbols (₹, commas, spaces)
-                raw_arr = acc.Annual_Contract_ARR or '0'
-                cleaned_arr = ''.join(c for c in str(raw_arr) if c.isdigit() or c == '.')
-                try:
-                    total_arr += float(cleaned_arr) if cleaned_arr else 0.0
-                except (ValueError, TypeError):
-                    pass
-
-                # Derive account status ('Active', 'Expiring', 'Overdue')
-                status_name = 'Active'
-                raw_status = (acc.Account_Status or '').strip().lower()
-
-                if 'overdue' in raw_status:
-                    status_name = 'Overdue'
-                elif 'expir' in raw_status or 'inact' in raw_status or 'cancel' in raw_status:
-                    status_name = 'Expiring'
-                elif 'active' in raw_status:
-                    status_name = 'Active'
-                elif acc.Active_Flag is False:
-                    status_name = 'Expiring'
-
-                # Date comparison with Next_Renewal
-                if acc.Next_Renewal:
-                    if acc.Next_Renewal < today:
-                        status_name = 'Overdue'
-                    elif today <= acc.Next_Renewal <= thirty_days_later:
-                        if status_name != 'Overdue':
-                            status_name = 'Expiring'
+            for acc in accounts:
+                summary = _derive_account_contract_summary(
+                    acc, subs_by_customer, renewals_by_customer, today
+                )
+                total_arr += summary['arr']
+                status_name = summary['status']
 
                 if status_name == 'Active':
                     active_count += 1
-                    # Extract product name for product adoption breakdown
-                    prod_name = (acc.Primary_Product or '').strip()
-                    if not prod_name and acc.Product_Id:
-                        prod_name = (getattr(acc.Product_Id, 'Product_Name', None) or '').strip()
-                    if not prod_name:
-                        prod_name = 'Pegatto CRM'
+                    prod_name = summary['product'] or (acc.Industry or '').strip() or 'Pegatto CRM'
 
-                    # Check if matches standard product categories (case-insensitive)
                     matched_category = None
                     for std_cat in list(product_counts.keys()):
                         if std_cat.lower() in prod_name.lower():
@@ -4738,7 +4942,6 @@ class CustomerKpiAnalyticsAPI(APIView):
                         product_counts[matched_category] += 1
                     else:
                         product_counts[prod_name] = product_counts.get(prod_name, 0) + 1
-
                 elif status_name == 'Expiring':
                     expiring_count += 1
                 elif status_name == 'Overdue':
@@ -4746,7 +4949,6 @@ class CustomerKpiAnalyticsAPI(APIView):
                 else:
                     active_count += 1
 
-            # Format total ARR into Indian numbering system (Cr / L / Thousands)
             if total_arr >= 10000000:
                 formatted_arr = f"₹{total_arr / 10000000:.2f} Cr"
             elif total_arr >= 100000:
@@ -4754,12 +4956,10 @@ class CustomerKpiAnalyticsAPI(APIView):
             else:
                 formatted_arr = f"₹{int(total_arr):,}"
 
-            # Calculate distribution percentages
             active_pct = round((active_count / total_customers * 100), 1) if total_customers > 0 else 0.0
             expiring_pct = round((expiring_count / total_customers * 100), 1) if total_customers > 0 else 0.0
             overdue_pct = round((overdue_count / total_customers * 100), 1) if total_customers > 0 else 0.0
 
-            # Build product adoption list with individual percentages
             active_base = active_count if active_count > 0 else 1
             product_adoption = [
                 {
@@ -14199,6 +14399,7 @@ class AddonPricingListwithPagination(ListAPIView):
 class AddonPricingSearch(ListAPIView):
     authentication_classes = []
     permission_classes = []
+    pagination_class = None
     queryset = AddonPricing.objects.all()
     serializer_class = AddonPricingSerializer
 
@@ -14561,6 +14762,7 @@ class AddonTieredPricinglistwithoutpaginaton(APIView):
 class AddonTieredPricingSearch(ListAPIView):
     authentication_classes = []
     permission_classes = []
+    pagination_class = None
     queryset = AddonTieredPricing.objects.all()
     serializer_class = AddonTieredPricingSerializer
 
@@ -14656,32 +14858,106 @@ class AddonTieredPricingExportAPI(APIView):
     def _export(self, data):
         try:
             import csv, io
-            pricings = AddonPricing.objects.filter(Is_Deleted=False).order_by('id')
+            search = str(data.get("search") or data.get("q") or "").strip()
+            status_val = str(data.get("status") or data.get("Status") or "").strip()
+            ids_raw = data.get("ids")
+            selected_ids = []
+            if ids_raw:
+                if isinstance(ids_raw, list):
+                    selected_ids = [int(i) for i in ids_raw if str(i).strip().isdigit()]
+                else:
+                    selected_ids = [int(i) for i in str(ids_raw).split(",") if i.strip().isdigit()]
+
+            tiers_qs = (
+                AddonTieredPricing.objects.filter(Is_Deleted=False)
+                .select_related("Addon_Pricing", "Addon_Pricing__Addon", "Addon_Pricing__Price_Template")
+                .order_by("Addon_Pricing_id", "Min_Employees", "id")
+            )
+            if search:
+                tiers_qs = tiers_qs.filter(
+                    Q(Addon_Pricing__Addon_Name__icontains=search)
+                    | Q(AddonTieredPricing_Id__icontains=search)
+                    | Q(Addon_Pricing__Addon__AddonMaster_Id__icontains=search)
+                    | Q(Addon_Pricing__Addon__Category__icontains=search)
+                )
+            if status_val and status_val.lower() != "all status":
+                if status_val.lower() == "active":
+                    tiers_qs = tiers_qs.filter(Is_Active=True)
+                elif status_val.lower() in ["draft", "inactive"]:
+                    tiers_qs = tiers_qs.filter(Is_Active=False)
+            if selected_ids:
+                tiers_qs = tiers_qs.filter(
+                    Q(id__in=selected_ids) | Q(Addon_Pricing_id__in=selected_ids)
+                )
+
             output = io.StringIO()
             output.write('\ufeff')
             writer = csv.writer(output)
             writer.writerow([
+                "Tier Code",
                 "Schedule Code",
                 "Schedule Name",
                 "Add-on Name",
                 "Billing Cycle",
-                "Tiers Count",
+                "Min Units",
+                "Max Units",
+                "Tier Price",
+                "Currency",
                 "Status",
             ])
 
-            for idx, p in enumerate(pricings, start=1):
-                tiers = AddonTieredPricing.objects.filter(Addon_Pricing=p, Is_Deleted=False)
-                t_count = tiers.count() or 3
-                cycle = getattr(p.Price_Template, 'Billing_Cycle', 'Monthly') if p.Price_Template else 'Monthly'
-                status_str = "Active" if p.Is_Active else "Draft"
+            tiers_list = list(tiers_qs)
+            pricing_counts = {}
+            for tier in tiers_list:
+                pid = tier.Addon_Pricing_id or 0
+                pricing_counts[pid] = pricing_counts.get(pid, 0) + 1
+
+            for idx, tier in enumerate(tiers_list, start=1):
+                pricing = tier.Addon_Pricing
+                addon_name = pricing.Addon_Name if pricing else ""
+                addon_code = getattr(getattr(pricing, "Addon", None), "AddonMaster_Id", "") if pricing else ""
+                sched_code = f"TP-{addon_code}" if addon_code else f"TP-{str(tier.Addon_Pricing_id or idx).zfill(3)}"
+                tpl = getattr(pricing, "Price_Template", None) if pricing else None
+                cycle = getattr(tpl, "Billing_Cycle", None) or "Monthly"
+                currency = getattr(tpl, "Currency", None) or "INR"
+                status_str = "Active" if tier.Is_Active else "Inactive"
                 writer.writerow([
-                    f"TP-{str(idx).zfill(3)}",
-                    f"{p.Addon_Name} - Volume",
-                    p.Addon_Name,
+                    tier.AddonTieredPricing_Id or f"TIER-{tier.id}",
+                    sched_code,
+                    f"{addon_name} - Volume" if addon_name else sched_code,
+                    addon_name,
                     cycle,
-                    f"{t_count} tiers",
+                    tier.Min_Employees,
+                    tier.Max_Employees,
+                    f"{float(tier.Tier_Price or 0):.2f}",
+                    currency,
                     status_str,
                 ])
+
+            if not tiers_list and not selected_ids:
+                pricings = AddonPricing.objects.filter(Is_Deleted=False).select_related("Addon", "Price_Template").order_by("id")
+                if search:
+                    pricings = pricings.filter(Q(Addon_Name__icontains=search) | Q(Addon__AddonMaster_Id__icontains=search))
+                if status_val and status_val.lower() != "all status":
+                    if status_val.lower() == "active":
+                        pricings = pricings.filter(Is_Active=True)
+                    elif status_val.lower() in ["draft", "inactive"]:
+                        pricings = pricings.filter(Is_Active=False)
+                for idx, p in enumerate(pricings, start=1):
+                    cycle = getattr(p.Price_Template, "Billing_Cycle", "Monthly") if p.Price_Template else "Monthly"
+                    currency = getattr(p.Price_Template, "Currency", "INR") if p.Price_Template else "INR"
+                    writer.writerow([
+                        f"TP-{str(idx).zfill(3)}",
+                        f"TP-{str(idx).zfill(3)}",
+                        f"{p.Addon_Name} - Volume",
+                        p.Addon_Name,
+                        cycle,
+                        1,
+                        "-",
+                        f"{float(p.Base_Price or 0):.2f}",
+                        currency,
+                        "Active" if p.Is_Active else "Draft",
+                    ])
 
             csv_content = output.getvalue()
             response = HttpResponse(csv_content, content_type="text/csv; charset=utf-8")
@@ -14788,6 +15064,7 @@ class AddonDiscountCouponlistwithoutpaginaton(APIView):
 class AddonDiscountCouponSearch(ListAPIView):
     authentication_classes = []
     permission_classes = []
+    pagination_class = None
     queryset = AddonDiscountCoupon.objects.all()
     serializer_class = AddonDiscountCouponSerializer
 
