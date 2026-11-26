@@ -6677,7 +6677,15 @@ class ModuleMasterlistwithoutpaginaton(APIView):
         try:
             product = request.query_params.get('product') or request.query_params.get('Product')
             qs = ModuleMaster.objects.filter(Is_Deleted=False)
-            if product:
+            edition_product = request.query_params.get('edition_product')
+            if edition_product is not None:
+                if not edition_product.isdigit():
+                    return Response({'detail': 'A numeric product ID is required.'}, status=400)
+                qs = qs.filter(
+                    Product_Edition_id__Product_Id_id=edition_product,
+                    Product_Edition_id__Is_Deleted=False,
+                ).distinct().prefetch_related('Product_Edition_id', 'ProductFeature_id')
+            elif product:
                 qs = qs.filter(Product__icontains=product)
             module = qs.order_by('-id')
             serialize = ModuleMasterSerializer(module, many=True)

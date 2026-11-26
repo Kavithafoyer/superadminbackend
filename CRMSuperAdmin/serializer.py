@@ -800,7 +800,7 @@ class ProductEditionSerializer(serializers.ModelSerializer):
         # Handle Edition_Id / Edition_Code mapping
         if 'Edition_Id' in data and not data.get('Edition_Code'):
             data['Edition_Code'] = data['Edition_Id']
-        elif 'Edition_Code' in data and not data.get('Edition_Id'):
+        elif self.instance is None and 'Edition_Code' in data and not data.get('Edition_Id'):
             data['Edition_Id'] = data['Edition_Code']
 
         # Product resolution if string or dict
@@ -816,21 +816,21 @@ class ProductEditionSerializer(serializers.ModelSerializer):
                 data['Product_Id'] = prod_val.id
 
         # Fallback to first ProductMaster if missing
-        if not data.get('Product_Id'):
+        if self.instance is None and not data.get('Product_Id'):
             first_prod = ProductMaster.objects.first()
             if first_prod:
                 data['Product_Id'] = first_prod.id
 
         # Default fallback for Organization_Id, Created_By, Updated_By if missing
-        if not data.get('Organization_Id'):
+        if self.instance is None and not data.get('Organization_Id'):
             first_org = Userorganizationmaster.objects.first()
             if first_org:
                 data['Organization_Id'] = first_org.id
-        if not data.get('Created_By'):
+        if self.instance is None and not data.get('Created_By'):
             first_user = UserAdmin.objects.first()
             if first_user:
                 data['Created_By'] = first_user.id
-        if not data.get('Updated_By'):
+        if self.instance is None and not data.get('Updated_By'):
             data['Updated_By'] = data.get('Created_By')
 
         return super().to_internal_value(data)
