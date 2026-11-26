@@ -29,6 +29,7 @@ load_dotenv()
 
 
 key =config("key")
+
 # key = config('key', default=None)
 # if not key:
 #     raise Exception("Environment variable 'key' is required in production")
@@ -250,6 +251,7 @@ WSGI_APPLICATION = 'CRM.wsgi.application'
 
 
 # local db
+
 
 # DATABASES = {
 # 'default': {

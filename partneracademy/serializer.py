@@ -105,3 +105,30 @@ class AcademyNotificationSerializers(serializers.ModelSerializer):
         model = AcademyNotification
         fields = '__all__'
         depth = 1
+
+
+class TechnicalDocumentationSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = TechnicalDocumentation
+        fields = '__all__'
+
+
+class TechnicalDocumentationSerializers(serializers.ModelSerializer):
+    class Meta:
+        model = TechnicalDocumentation
+        fields = '__all__'
+        depth = 1
+
+
+
+class PartnerFAQSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = PartnerFAQ
+        fields = '__all__'
+
+
+class PartnerFAQSerializers(serializers.ModelSerializer):
+    class Meta:
+        model = PartnerFAQ
+        fields = '__all__'
+        depth = 1
