@@ -445,6 +445,8 @@ path('SystemHealthAPI/', SystemHealthAPI.as_view(), name='system-health-api'),
 path('ProductPerformanceDashboardAPI/', ProductPerformanceDashboardAPI.as_view(), name='product-performance-dashboard'),
 path('CustomerKpiDashboardAPI/', CustomerKpiDashboardAPI.as_view(), name='customer-kpi-dashboard'),
 path('PartnerKpiDashboardAPI/', PartnerKpiDashboardAPI.as_view(), name='partner-kpi-dashboard'),
+path('RevenueSubscriptionAnalyticsDashboardAPI/', RevenueSubscriptionAnalyticsDashboardAPI.as_view(), name='revenue-subscription-analytics-dashboard'),
+path('SystemHealthAlertsDashboardAPI/', SystemHealthAlertsDashboardAPI.as_view(), name='system-health-alerts-dashboard'),
 
 
 

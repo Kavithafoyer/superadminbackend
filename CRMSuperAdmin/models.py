@@ -731,62 +731,8 @@ class ProductMaster(models.Model):
         db_table = 'ProductMaster'
         ordering = ['-id']
 
-class Plan(models.Model):
-    Organization_Id = models.ForeignKey(Userorganizationmaster, on_delete=models.CASCADE,blank=True,null=True)
-    Plan_Id = models.CharField(max_length=20,unique=True)
-    Product = models.ForeignKey('ProductMaster', on_delete=models.CASCADE, blank=True, null=True, related_name='plans')
-    Plan_price=models.JSONField(blank=True,null=True)    ##{Feature price list  "feature name":"whatsapp","price","1000"}
-    Plan_per_month = models.BooleanField(default=False,blank=True,null=True)
-    Plan_per_year = models.BooleanField(default=False,blank=True,null=True)
-    Planmonth_price = models.IntegerField(default=0,blank=True,null=True)
-    Planyear_price=models.IntegerField(default=0,blank=True,null=True)
-    Description = models.TextField(default='',blank=True,null=True)
-    ##--------
-    Plan_Name = models.CharField(max_length=50,blank=True,null=True)  ##product Name
-    Noofcontacts = models.IntegerField(blank=True,null=True)
-    Noofmonths = models.IntegerField(blank=True,null=True)
-    Country = models.CharField(max_length=50,blank=True,null=True)
-    Plantype = models.CharField(max_length=20,blank=True,null=True)
-    Trialperiod = models.IntegerField(blank=True,null=True)
-    UnitPrice = models.FloatField(blank=True,null=True)
-    Setupfees = models.FloatField(blank=True,null=True)
-    Currency_Type = models.CharField(max_length=10,blank=True,null=True)
-    No_Of_Users = models.IntegerField(blank=True,null=True)   ##minimun users
-    AllocatedStorage = models.IntegerField(blank=True,null=True)  ##storage
-    AllocatedAddons = models.ManyToManyField(AddonMaster, blank=True)
-    billing_cycle = models.CharField(max_length=20, default='monthly', choices=BILLING_CYCLE_CHOICES, blank=True, null=True)
-    Tax = models.CharField(max_length=100, blank=True, null=True)
-    TaxPercentage = models.FloatField(default=0, blank=True, null=True)
-    TaxAmount = models.FloatField(default=0, blank=True, null=True)
-    TotalAmount = models.FloatField(default=0, blank=True, null=True)
-    is_limited = models.BooleanField(default=False, blank=True, null=True)
-    Is_Active_Flg = models.BooleanField(default=True,blank=True,null=True)
-    # Modules = models.ManyToManyField(ModuleMaster, related_name="plans", blank=True) ##commented by kavi on 23 nov
-    Is_Deleted = models.BooleanField(default=False,blank=True,null=True)
-    Is_Archived = models.BooleanField(default=False,blank=True,null=True)
-    ##updated fields
-    Max_Leads = models.IntegerField(null=True, blank=True)
-    Max_account = models.IntegerField(null=True, blank=True)
-    Created_By = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='created_Plan_SA1i',blank=True,null=True)
-    Created_Date = models.DateTimeField(default=timezone.now,blank=True,null=True)
-    Updated_By = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='updatedplan_SA1i',blank=True,null=True)
-    Updated_Date = models.DateTimeField(default=timezone.now,blank=True,null=True)
-    # role = models.ForeignKey('authapp.Role', on_delete=models.SET_NULL, null=True, blank=True, related_name='plans')
-    menu = models.ManyToManyField('authapp.Menu', blank=True, related_name='menus')
 
-    @property
-    def PlanDetails(self):
-        # Backward compatibility alias
-        return self.Description or ""
 
-    @property
-    def Addstorage(self):
-        # Backward compatibility alias
-        return 0
-
-    class Meta:
-        db_table = 'Plan'
-        ordering = ['-id']
 
 
 def ProductEdition_I():
@@ -912,6 +858,69 @@ class ProductEdition(models.Model):
 
     def __str__(self):
         return self.Edition_Name or ''
+
+
+class Plan(models.Model):
+    Organization_Id = models.ForeignKey(Userorganizationmaster, on_delete=models.CASCADE,blank=True,null=True)
+    Plan_Id = models.CharField(max_length=20,unique=True)
+    Product = models.ForeignKey('ProductMaster', on_delete=models.CASCADE, blank=True, null=True, related_name='plans')
+    Plan_price=models.JSONField(blank=True,null=True)    ##{Feature price list  "feature name":"whatsapp","price","1000"}
+    Plan_per_month = models.BooleanField(default=False,blank=True,null=True)
+    Plan_per_year = models.BooleanField(default=False,blank=True,null=True)
+    Planmonth_price = models.IntegerField(default=0,blank=True,null=True)
+    Planyear_price=models.IntegerField(default=0,blank=True,null=True)
+    Description = models.TextField(default='',blank=True,null=True)
+    ##--------
+    Plan_Name = models.CharField(max_length=50,blank=True,null=True)  ##product Name
+    Noofcontacts = models.IntegerField(blank=True,null=True)
+    Noofmonths = models.IntegerField(blank=True,null=True)
+    Country = models.CharField(max_length=50,blank=True,null=True)
+    Plantype = models.CharField(max_length=20,blank=True,null=True)
+    Trialperiod = models.IntegerField(blank=True,null=True)
+    UnitPrice = models.FloatField(blank=True,null=True)
+    Setupfees = models.FloatField(blank=True,null=True)
+    Currency_Type = models.CharField(max_length=10,blank=True,null=True)
+    No_Of_Users = models.IntegerField(blank=True,null=True)   ##minimun users
+    AllocatedStorage = models.IntegerField(blank=True,null=True)  ##storage
+    AllocatedAddons = models.ManyToManyField(AddonMaster, blank=True)
+    billing_cycle = models.CharField(max_length=20, default='monthly', choices=BILLING_CYCLE_CHOICES, blank=True, null=True)
+    Tax = models.CharField(max_length=100, blank=True, null=True)
+    TaxPercentage = models.FloatField(default=0, blank=True, null=True)
+    TaxAmount = models.FloatField(default=0, blank=True, null=True)
+    TotalAmount = models.FloatField(default=0, blank=True, null=True)
+    is_limited = models.BooleanField(default=False, blank=True, null=True)
+    Is_Active_Flg = models.BooleanField(default=True,blank=True,null=True)
+    # Modules = models.ManyToManyField(ModuleMaster, related_name="plans", blank=True) ##commented by kavi on 23 nov
+    Is_Deleted = models.BooleanField(default=False,blank=True,null=True)
+    Is_Archived = models.BooleanField(default=False,blank=True,null=True)
+    ##updated fields
+    Max_Leads = models.IntegerField(null=True, blank=True)
+    ProductEdition_id = models.ForeignKey(ProductEdition,on_delete=models.CASCADE,related_name='created_productedition')
+    Max_account = models.IntegerField(null=True, blank=True)
+    Created_By = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='created_Plan_SA1i',blank=True,null=True)
+    Created_Date = models.DateTimeField(default=timezone.now,blank=True,null=True)
+    Updated_By = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='updatedplan_SA1i',blank=True,null=True)
+    Updated_Date = models.DateTimeField(default=timezone.now,blank=True,null=True)
+    # role = models.ForeignKey('authapp.Role', on_delete=models.SET_NULL, null=True, blank=True, related_name='plans')
+    menu = models.ManyToManyField('authapp.Menu', blank=True, related_name='menus')
+
+    @property
+    def PlanDetails(self):
+        # Backward compatibility alias
+        return self.Description or ""
+
+    @property
+    def Addstorage(self):
+        # Backward compatibility alias
+        return 0
+
+    class Meta:
+        db_table = 'Plan'
+        ordering = ['-id']
+
+
+
+
 def ProductFeature_I():
     Task = ProductFeature.objects.all().order_by('id').last()
 

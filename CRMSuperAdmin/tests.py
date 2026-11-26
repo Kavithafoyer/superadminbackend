@@ -10,12 +10,22 @@ from CRMSuperAdmin.DashboardService.customer_partner_kpi_service import (
     _build_top_customers_by_arr,
     _build_top_partners_by_revenue,
 )
+from CRMSuperAdmin.DashboardService.revenue_subscription_analytics_service import (
+    _build_plan_customer_distribution,
+    _build_revenue_by_plan,
+    _compute_subscription_revenue,
+    _filtered_renewals_qs,
+)
 from CRMSuperAdmin.DashboardService.superadmin_dashboard_service import (
     _apply_account_scope,
     _compute_mrr_arr_from_subs,
     _compute_open_tickets,
     _format_inr,
     parse_dashboard_filters,
+)
+from CRMSuperAdmin.DashboardService.system_health_service import (
+    _build_active_alerts,
+    parse_system_health_filters,
 )
 from CRMSuperAdmin.services.customer_overview_service import (
     _compute_customer_health,
@@ -31,6 +41,8 @@ from CRMSuperAdmin.views import (
     CustomerUsageHealthAnalyticsAPI,
     PartnerKpiDashboardAPI,
     ProductPerformanceDashboardAPI,
+    RevenueSubscriptionAnalyticsDashboardAPI,
+    SystemHealthAlertsDashboardAPI,
     SystemHealthAPI,
 )
 
@@ -497,3 +509,207 @@ class CustomerAndPartnerKpiAPITests(SimpleTestCase):
         p_resp = PartnerKpiDashboardAPI.as_view()(p_req, tenant_name="default")
         self.assertEqual(p_resp.status_code, 200)
         self.assertTrue(p_resp.data["status"])
+
+
+class RevenueSubscriptionAnalyticsAPITests(SimpleTestCase):
+    """Tests for RevenueSubscriptionAnalyticsDashboardAPI."""
+
+    def setUp(self):
+        self.factory = APIRequestFactory()
+        self.user = SimpleNamespace(is_authenticated=True, pk=1, id=1)
+
+    def test_revenue_subscription_url_resolves(self):
+        url = reverse("revenue-subscription-analytics-dashboard", kwargs={"tenant_name": "default"})
+        self.assertEqual(url, "/default/superadmin/RevenueSubscriptionAnalyticsDashboardAPI/")
+        self.assertEqual(resolve(url).func.view_class, RevenueSubscriptionAnalyticsDashboardAPI)
+
+    @patch("CRMSuperAdmin.DashboardService.revenue_subscription_analytics_service.InvoiceLineItem")
+    def test_subscription_revenue_uses_icontains_and_excludes_addon(self, mock_line_item):
+        filters = parse_dashboard_filters({"country": "India", "product_id": 2})
+        chain = MagicMock()
+        chain.exclude.return_value = chain
+        chain.filter.return_value = chain
+        chain.aggregate.return_value = {"total": 67800000.0}
+        mock_line_item.objects.filter.return_value = chain
+
+        total = _compute_subscription_revenue(filters, filters["start_dt"], filters["end_dt"])
+        self.assertEqual(total, 67800000.0)
+        self.assertEqual(mock_line_item.objects.filter.call_args.kwargs["Invoice_Id__Payment_Status__icontains"], "paid")
+        chain.exclude.assert_called_once_with(Item_Type__icontains="addon")
+
+    @patch("CRMSuperAdmin.DashboardService.revenue_subscription_analytics_service.Renewal")
+    def test_filtered_renewals_uses_icontains(self, mock_renewal):
+        qs = MagicMock()
+        qs.filter.return_value = qs
+        mock_renewal.objects.filter.return_value = qs
+        filters = parse_dashboard_filters({"country": "India", "partner_type": "Gold", "product_id": 4})
+
+        _filtered_renewals_qs(filters)
+        calls = [c.kwargs for c in qs.filter.call_args_list]
+        self.assertIn({"Product_Id_id": 4}, calls)
+        self.assertIn({"Customer_Id__Country__icontains": "India"}, calls)
+
+    def test_revenue_by_subscription_plan_groups_and_calculates_pct(self):
+        filters = parse_dashboard_filters({})
+        sub_pro = SimpleNamespace(Plan_Id_id=1, Plan_Id=SimpleNamespace(Plan_Name="Professional", billing_cycle="yearly"), Plan_Name="Professional", is_trial=False, SuscriptionAmount=600000, SubscriptionPeriod="yearly")
+        sub_basic = SimpleNamespace(Plan_Id_id=2, Plan_Id=SimpleNamespace(Plan_Name="Basic", billing_cycle="yearly"), Plan_Name="Basic", is_trial=False, SuscriptionAmount=400000, SubscriptionPeriod="yearly")
+        sub_free = SimpleNamespace(Plan_Id_id=3, Plan_Id=SimpleNamespace(Plan_Name="Free Core (Non-paid)", billing_cycle="monthly"), Plan_Name="Free Core (Non-paid)", is_trial=False, SuscriptionAmount=0, SubscriptionPeriod="monthly")
+
+        subs_qs = MagicMock()
+        subs_qs.filter.return_value.exclude.return_value.filter.return_value.select_related.return_value = [sub_pro, sub_basic, sub_free]
+
+        result = _build_revenue_by_plan(subs_qs, filters["end_dt"])
+        self.assertEqual(result["total_revenue"], 1000000.0)
+        by_name = {s["plan_name"]: s for s in result["segments"]}
+        self.assertEqual(by_name["Professional"]["pct"], 60.0)
+        self.assertEqual(by_name["Basic"]["pct"], 40.0)
+        self.assertEqual(by_name["Free Core (Non-paid)"]["pct"], 0.0)
+
+    @patch("CRMSuperAdmin.views.build_revenue_subscription_analytics_dashboard")
+    def test_revenue_subscription_api_view_returns_200_and_validates_pk(self, mock_build):
+        view = RevenueSubscriptionAnalyticsDashboardAPI.as_view()
+        mock_build.return_value = {"kpis": {"total_revenue": {"value": 80200000.0}}}
+
+        bad_req = self.factory.get("/default/superadmin/RevenueSubscriptionAnalyticsDashboardAPI/", {"product_id": "PRO-01"})
+        force_authenticate(bad_req, user=self.user)
+        self.assertEqual(view(bad_req, tenant_name="default").status_code, 400)
+
+        ok_req = self.factory.get("/default/superadmin/RevenueSubscriptionAnalyticsDashboardAPI/", {"product_id": 1, "partner_id": 2})
+        force_authenticate(ok_req, user=self.user)
+        ok_resp = view(ok_req, tenant_name="default")
+        self.assertEqual(ok_resp.status_code, 200)
+        self.assertTrue(ok_resp.data["status"])
+
+    def test_from_and_to_date_without_date_range_switches_to_custom(self):
+        filters = parse_dashboard_filters({"from_date": "2026-11-01", "to_date": "2026-11-26"})
+        self.assertEqual(filters["date_range"], "custom")
+        self.assertEqual(str(filters["start_date"]), "2026-11-01")
+        self.assertEqual(str(filters["end_date"]), "2026-11-26")
+
+    def test_plan_customer_distribution_deduplicates_plan_id(self):
+        filters = parse_dashboard_filters({})
+        plan_obj = SimpleNamespace(Plan_Name="Premiumlan")
+        s1 = SimpleNamespace(Plan_Id_id=2, Plan_Id=plan_obj, Plan_Name="Premiumlan", Customer_Id_id=10)
+        s2 = SimpleNamespace(Plan_Id_id=2, Plan_Id=plan_obj, Plan_Name="", Customer_Id_id=11)
+        s3 = SimpleNamespace(Plan_Id_id=2, Plan_Id=plan_obj, Plan_Name=None, Customer_Id_id=10)
+
+        subs_qs = MagicMock()
+        subs_qs.filter.return_value.exclude.return_value.filter.return_value.select_related.return_value = [s1, s2, s3]
+
+        dist = _build_plan_customer_distribution(subs_qs, filters["end_dt"])
+        self.assertEqual(dist["total_active_tenants"], 2)
+        self.assertEqual(len(dist["segments"]), 1)
+        self.assertEqual(dist["segments"][0]["plan_id"], 2)
+        self.assertEqual(dist["segments"][0]["customers_count"], 2)
+
+    @patch("CRMSuperAdmin.views.build_partner_kpi_dashboard")
+    @patch("CRMSuperAdmin.views.build_customer_kpi_dashboard")
+    @patch("CRMSuperAdmin.views.build_product_performance_dashboard")
+    @patch("CRMSuperAdmin.views.build_business_overview_dashboard")
+    def test_custom_from_to_date_works_across_all_four_dashboard_apis(
+        self, mock_biz, mock_prod, mock_cust, mock_part
+    ):
+        mock_biz.return_value = {}
+        mock_prod.return_value = {}
+        mock_cust.return_value = {}
+        mock_part.return_value = {}
+
+        params = {
+            "date_range": "last_12_months",
+            "from_date": "2026-11-01",
+            "to_date": "2026-11-26",
+        }
+        endpoints = [
+            ("/default/superadmin/BusinessOverviewDashboardAPI/", BusinessOverviewDashboardAPI.as_view(), mock_biz),
+            ("/default/superadmin/ProductPerformanceDashboardAPI/", ProductPerformanceDashboardAPI.as_view(), mock_prod),
+            ("/default/superadmin/CustomerKpiDashboardAPI/", CustomerKpiDashboardAPI.as_view(), mock_cust),
+            ("/default/superadmin/PartnerKpiDashboardAPI/", PartnerKpiDashboardAPI.as_view(), mock_part),
+        ]
+        for path, view_fn, mock_builder in endpoints:
+            req = self.factory.get(path, params)
+            force_authenticate(req, user=self.user)
+            resp = view_fn(req, tenant_name="default")
+            self.assertEqual(resp.status_code, 200)
+            passed_filters = mock_builder.call_args[0][0]
+            self.assertEqual(passed_filters["date_range"], "custom")
+            self.assertEqual(str(passed_filters["start_date"]), "2026-11-01")
+            self.assertEqual(str(passed_filters["end_date"]), "2026-11-26")
+
+
+class SystemHealthAlertsDashboardAPITests(SimpleTestCase):
+    """Tests for SystemHealthAlertsDashboardAPI."""
+
+    def setUp(self):
+        self.factory = APIRequestFactory()
+        self.user = SimpleNamespace(is_authenticated=True, pk=1, id=1)
+
+    def test_system_health_alerts_url_resolves(self):
+        url = reverse("system-health-alerts-dashboard", kwargs={"tenant_name": "default"})
+        self.assertEqual(url, "/default/superadmin/SystemHealthAlertsDashboardAPI/")
+        self.assertEqual(resolve(url).func.view_class, SystemHealthAlertsDashboardAPI)
+
+    def test_parse_system_health_filters_defaults_30d_and_accepts_custom_dates(self):
+        default_f = parse_system_health_filters({})
+        self.assertEqual(default_f["date_range"], "last_30_days")
+
+        custom_f = parse_system_health_filters(
+            {"from_date": "2026-11-01", "to_date": "2026-11-26", "service_name": "postgres", "status": "healthy", "severity": "low"}
+        )
+        self.assertEqual(custom_f["date_range"], "custom")
+        self.assertEqual(custom_f["service_name"], "postgres")
+        self.assertEqual(custom_f["status"], "healthy")
+        self.assertEqual(custom_f["severity"], "low")
+
+    @patch("CRMSuperAdmin.DashboardService.system_health_service.TenantProvisioningJob")
+    @patch("CRMSuperAdmin.DashboardService.system_health_service.TicketManagement")
+    def test_active_alerts_uses_icontains_and_includes_degraded_services(self, mock_ticket, mock_prov):
+        ticket_qs = MagicMock()
+        ticket_qs.exclude.return_value = ticket_qs
+        ticket_qs.order_by.return_value = []
+        mock_ticket.objects.filter.return_value = ticket_qs
+
+        mock_prov.objects.filter.return_value.order_by.return_value = []
+
+        filters = parse_system_health_filters({"service_name": "Email", "severity": "Medium"})
+        services = [
+            {
+                "id": 7,
+                "service_name": "Email / Notification Service",
+                "status": "Degraded",
+                "api_error_rate_pct": 2.4,
+                "avg_latency_ms": 415,
+                "last_heartbeat": "2026-11-26T10:00:00Z",
+                "queue_backlog": None,
+            },
+            {
+                "id": 3,
+                "service_name": "Database (PostgreSQL)",
+                "status": "Healthy",
+                "api_error_rate_pct": 0.0,
+                "avg_latency_ms": 12,
+                "last_heartbeat": "2026-11-26T10:00:00Z",
+                "queue_backlog": 0,
+            },
+        ]
+        alerts = _build_active_alerts(services, filters)
+        self.assertEqual(len(alerts), 1)
+        self.assertEqual(alerts[0]["service_name"], "Email / Notification Service")
+        self.assertEqual(alerts[0]["severity"], "Medium")
+        self.assertEqual(mock_ticket.objects.filter.call_args.kwargs["Priority__icontains"], "critical")
+        self.assertEqual(mock_prov.objects.filter.call_args.kwargs["status__icontains"], "fail")
+
+    @patch("CRMSuperAdmin.views.build_system_health_alerts_dashboard")
+    def test_system_health_alerts_view_returns_200(self, mock_build):
+        view = SystemHealthAlertsDashboardAPI.as_view()
+        mock_build.return_value = {"kpis": {"total_services": 9}}
+
+        req = self.factory.get(
+            "/default/superadmin/SystemHealthAlertsDashboardAPI/",
+            {"from_date": "2026-11-01", "to_date": "2026-11-26", "service_name": "Celery"},
+        )
+        force_authenticate(req, user=self.user)
+        resp = view(req, tenant_name="default")
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.data["status"])
+        self.assertEqual(mock_build.call_args[0][0]["date_range"], "custom")
+        self.assertEqual(mock_build.call_args[0][0]["service_name"], "Celery")

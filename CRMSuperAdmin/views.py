@@ -13330,6 +13330,58 @@ class PartnerKpiDashboardAPI(_BaseDashboardAPI):
         )
 
 
+from CRMSuperAdmin.DashboardService.revenue_subscription_analytics_service import (
+    build_revenue_subscription_analytics_dashboard,
+)
+
+
+class RevenueSubscriptionAnalyticsDashboardAPI(_BaseDashboardAPI):
+    """Returns Revenue & Subscription Analytics KPIs, plan/type/product breakdowns, funnel, and trends."""
+
+    def get(self, request, *args, **kwargs):
+        return self._run_dashboard(
+            request,
+            build_revenue_subscription_analytics_dashboard,
+            "Revenue & Subscription Analytics dashboard retrieved successfully",
+        )
+
+
+from CRMSuperAdmin.DashboardService.system_health_service import (
+    build_system_health_alerts_dashboard,
+    parse_system_health_filters,
+)
+
+
+class SystemHealthAlertsDashboardAPI(APIView):
+    """Returns System Health & Alerts KPIs, 9-service status table, active alerts, and daily trends."""
+
+    # authentication_classes = [JWTAuthentication]
+    # permission_classes = [IsAuthenticated]
+
+    def get(self, request, *args, **kwargs):
+        try:
+            filters = parse_system_health_filters(request.query_params)
+            data = build_system_health_alerts_dashboard(filters)
+            return Response(
+                {
+                    "status": True,
+                    "message": "System health & alerts dashboard retrieved successfully",
+                    "data": data,
+                },
+                status=status.HTTP_200_OK,
+            )
+        except ValueError as e:
+            return Response(
+                {"status": False, "message": str(e), "data": None},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        except Exception as e:
+            return Response(
+                {"status": False, "message": str(e), "data": None},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+
 # Add ons :-
 
 # Add On Category :-

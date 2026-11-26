@@ -95,8 +95,26 @@ def parse_dashboard_filters(query_params):
     now_dt = timezone.now()
     today = now_dt.date()
 
-    raw_range = (query_params.get("date_range") or "last_12_months").strip().lower()
-    if raw_range in ("last_30_days", "30d"):
+    raw_from = (query_params.get("from_date") or "").strip()
+    raw_to = (query_params.get("to_date") or "").strip()
+    raw_range = (query_params.get("date_range") or "").strip().lower()
+
+    if raw_range == "custom" or raw_from or raw_to:
+        if not raw_from and not raw_to:
+            raise ValueError("from_date and to_date are required when date_range is 'custom'.")
+        try:
+            end_date = datetime.strptime(raw_to, "%Y-%m-%d").date() if raw_to else today
+            start_date = (
+                datetime.strptime(raw_from, "%Y-%m-%d").date()
+                if raw_from
+                else date(end_date.year, end_date.month, 1)
+            )
+        except ValueError as exc:
+            raise ValueError("from_date and to_date must be in YYYY-MM-DD format.") from exc
+        if start_date > end_date:
+            raise ValueError("from_date cannot be after to_date.")
+        normalized_range = "custom"
+    elif raw_range in ("last_30_days", "30d"):
         start_date = today - timedelta(days=30)
         end_date = today
         normalized_range = "last_30_days"
@@ -108,19 +126,6 @@ def parse_dashboard_filters(query_params):
         start_date = date(today.year, 1, 1)
         end_date = today
         normalized_range = "this_year"
-    elif raw_range == "custom":
-        raw_from = (query_params.get("from_date") or "").strip()
-        raw_to = (query_params.get("to_date") or "").strip()
-        if not raw_from or not raw_to:
-            raise ValueError("from_date and to_date are required when date_range is 'custom'.")
-        try:
-            start_date = datetime.strptime(raw_from, "%Y-%m-%d").date()
-            end_date = datetime.strptime(raw_to, "%Y-%m-%d").date()
-        except ValueError as exc:
-            raise ValueError("from_date and to_date must be in YYYY-MM-DD format.") from exc
-        if start_date > end_date:
-            raise ValueError("from_date cannot be after to_date.")
-        normalized_range = "custom"
     else:
         first_y, first_m = _subtract_months(today.year, today.month, 11)
         start_date = date(first_y, first_m, 1)
@@ -665,20 +670,30 @@ def _build_monthly_customer_growth(accounts_qs, filters):
 
 
 def _build_product_adoption_donut(active_instances_qs, total_active_tenants):
-    """Group active tenants by ProductMaster for donut chart."""
-    rows = (
-        active_instances_qs.values("Product_Id_id", "Product_Id__Product_Name", "Product_Id__Product_Code")
-        .annotate(count=Count("Customer_Id_id", distinct=True))
-        .order_by("-count")
+    """Group active tenants by ProductMaster PK for donut chart without duplicate rows."""
+    instances = list(
+        active_instances_qs.filter(Customer_Id_id__isnull=False).select_related("Product_Id")
     )
+    by_product = {}
+    for inst in instances:
+        pid = inst.Product_Id_id
+        pname = (
+            (inst.Product_Id.Product_Name or inst.Product_Id.Product_Code)
+            if inst.Product_Id
+            else (inst.product_type or "Unassigned")
+        )
+        if pid not in by_product:
+            by_product[pid] = {"product_id": pid, "product_name": pname, "customers": set()}
+        by_product[pid]["customers"].add(inst.Customer_Id_id)
+
     segments = []
-    for row in rows:
-        cnt = row["count"]
+    for item in sorted(by_product.values(), key=lambda x: len(x["customers"]), reverse=True):
+        cnt = len(item["customers"])
         pct = round((cnt / total_active_tenants) * 100, 1) if total_active_tenants > 0 else 0.0
         segments.append(
             {
-                "product_id": row["Product_Id_id"],
-                "product_name": row["Product_Id__Product_Name"] or row["Product_Id__Product_Code"] or "Unassigned",
+                "product_id": item["product_id"],
+                "product_name": item["product_name"],
                 "active_tenants": cnt,
                 "pct": pct,
             }
@@ -762,8 +777,7 @@ def _build_revenue_and_churn_trends(core, filters):
         month_mrr = sum(
             _sub_monthly_amount(s)
             for s in paying_subs
-            if (s.Created_Date is None or s.Created_Date <= month_end)
-            and (s.end_date is None or s.end_date >= date(yr, mo, 1))
+            if s.Created_Date is None or s.Created_Date <= month_end
         )
         rev_series.append(
             {
@@ -974,7 +988,7 @@ def build_product_performance_dashboard(filters):
         p_active = p_active_instances.filter(Created_Date__lte=filters["end_dt"]).values("Customer_Id_id").distinct().count()
         p_active_subs = p_subs.filter(Q(status__icontains="active") | Q(status__icontains="trial")).exclude(
             status__icontains="inactive"
-        )
+        ).filter(Created_Date__lte=filters["end_dt"])
         p_paying_qs = (
             p_active_subs.filter(status__icontains="active")
             .exclude(status__icontains="inactive")

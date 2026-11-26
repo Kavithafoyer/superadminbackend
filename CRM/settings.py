@@ -184,7 +184,7 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
-    # 'CRMSuperAdmin.SW_DB_Middleware_User.TenantMiddleware',
+    'CRMSuperAdmin.SW_DB_Middleware_User.TenantMiddleware',
     'CRMSuperAdmin.UpdateLastActivityMiddleware.UpdateLastActivityMiddleware',
     'corsheaders.middleware.CorsMiddleware',
     'django_prometheus.middleware.PrometheusAfterMiddleware',
