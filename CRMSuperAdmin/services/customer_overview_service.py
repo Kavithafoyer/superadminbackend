@@ -188,7 +188,10 @@ def _compute_usage_and_adoption(account, subscriptions, instances, licensed_seat
     if categories:
         product_q = Q()
         for category in categories:
-            product_q |= Q(Product__icontains=category)
+            product_q |= (
+                Q(ProductCategory__icontains=category)
+                | Q(ProductCategory_id__Category_Name__icontains=category)
+            )
         matched_modules = module_qs.filter(product_q)
         total_modules = matched_modules.count() if matched_modules.exists() else module_qs.count()
     else:

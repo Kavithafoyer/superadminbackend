@@ -1334,6 +1334,64 @@ class ProductEditionlistwithoutpaginaton(APIView):
             return HttpResponse(output, content_type="application/json", status=status.HTTP_400_BAD_REQUEST)
 
 
+class Planlistwithoutpaginaton(APIView):
+    def get(self, request, *args, **kwargs):
+        try:
+            edition_id = (
+                request.query_params.get('ProductEdition_id')
+                or request.query_params.get('Edition_Id')
+            )
+            qs = Plan.objects.filter(Is_Deleted=False)
+            qs = filter_by_product(qs, request)
+            if edition_id:
+                clean_edition = str(edition_id).strip()
+                if clean_edition.isdigit():
+                    qs = qs.filter(ProductEdition_id_id=int(clean_edition))
+                else:
+                    qs = qs.filter(
+                        Q(ProductEdition_id__Edition_Id__icontains=clean_edition)
+                        | Q(ProductEdition_id__Edition_Code__icontains=clean_edition)
+                        | Q(ProductEdition_id__Edition_Name__icontains=clean_edition)
+                    )
+            module = qs.order_by('-id')
+            serialize = Planserializer(module, many=True)
+            output = JSONRenderer().render(serialize.data)
+            return HttpResponse(output, content_type='application/json', status=status.HTTP_200_OK)
+        except Exception as e:
+            output = JSONRenderer().render({"Error": str(e)})
+            return HttpResponse(output, content_type="application/json", status=status.HTTP_400_BAD_REQUEST)
+
+
+class Planlistwithoutpaginaton(APIView):
+    def get(self, request, *args, **kwargs):
+        try:
+            edition_id = (
+                request.query_params.get('ProductEdition_id')
+                or request.query_params.get('Edition_Id')
+                or request.query_params.get('edition_id')
+                or request.query_params.get('edition')
+            )
+            qs = Plan.objects.filter(Is_Deleted=False)
+            qs = filter_by_product(qs, request)
+            if edition_id:
+                clean_edition = str(edition_id).strip()
+                if clean_edition.isdigit():
+                    qs = qs.filter(ProductEdition_id_id=int(clean_edition))
+                else:
+                    qs = qs.filter(
+                        Q(ProductEdition_id__Edition_Id__icontains=clean_edition)
+                        | Q(ProductEdition_id__Edition_Code__icontains=clean_edition)
+                        | Q(ProductEdition_id__Edition_Name__icontains=clean_edition)
+                    )
+            module = qs.order_by('-id')
+            serialize = Planserializer(module, many=True)
+            output = JSONRenderer().render(serialize.data)
+            return HttpResponse(output, content_type='application/json', status=status.HTTP_200_OK)
+        except Exception as e:
+            output = JSONRenderer().render({"Error": str(e)})
+            return HttpResponse(output, content_type="application/json", status=status.HTTP_400_BAD_REQUEST)
+
+
 class ProductEditionFilter(ListAPIView):
     queryset = ProductEdition.objects.all()
     serializer_class = ProductEditionSerializer
@@ -1546,14 +1604,28 @@ class ProductMasterListAPI(ListAPIView):
 class ProductMasterLookupsAPIView(APIView):
     def get(self, request, *args, **kwargs):
         try:
-            products = ProductMaster.objects.filter(Is_Deleted=False, Is_Active=True).order_by('id')
+            products = (
+                ProductMaster.objects.select_related('Category_id')
+                .filter(Is_Deleted=False, Is_Active=True)
+                .order_by('id')
+            )
+            category_id = request.query_params.get('Category_id') 
+            category_name = request.query_params.get('Category_Name')
+            if category_id and str(category_id).strip().isdigit():
+                products = products.filter(Category_id_id=int(str(category_id).strip()))
+            if category_name:
+                products = products.filter(
+                    Q(Category_id__Category_Name__icontains=str(category_name).strip())
+        
+                )
             results = [
                 {
                     "id": p.id,
                     "Product_Id": p.Product_Code,
                     "Product_Code": p.Product_Code,
                     "Product_Name": p.Product_Name,
-                    "Category": p.Category,
+                    "Category_id": p.Category_id_id,
+                    "Category_Name": p.Category_id.Category_Name if p.Category_id else p.Category,
                 }
                 for p in products
             ]

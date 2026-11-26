@@ -905,6 +905,7 @@ class Plan(models.Model):
     ##updated fields
     Max_Leads = models.IntegerField(null=True, blank=True)
     ProductEdition_id = models.ForeignKey(ProductEdition,on_delete=models.CASCADE,related_name='created_productedition')
+    ProductEdition_Name = models.CharField(max_length=100,blank=True,null=True)
     Max_account = models.IntegerField(null=True, blank=True)
     Created_By = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='created_Plan_SA1i',blank=True,null=True)
     Created_Date = models.DateTimeField(default=timezone.now,blank=True,null=True)
@@ -978,42 +979,14 @@ class ProductFeature(models.Model):
         blank=True,
         null=True
     )
+    ProductCategory_id = models.ForeignKey(ProductCategory , on_delete=models.CASCADE,blank=True,null=True,related_name='product_featurecatname')
 
-    Feature_Code = models.CharField(
-        max_length=100,
-        blank=True,
-        null=True
-    )
-
-    Feature_Name = models.CharField(
-        max_length=250,
-        blank=True,
-        null=True
-    )
-
-    Description = models.TextField(
-        blank=True,
-        null=True
-    )
-
-    Is_Active = models.BooleanField(
-        default=True,
-        blank=True,
-        null=True
-    )
-
-    Is_Deleted = models.BooleanField(
-        default=False,
-        blank=True,
-        null=True
-    )
-
-    Created_By = models.ForeignKey(
-        UserAdmin,
-        on_delete=models.CASCADE,
-        related_name='created_product_feature_set',
-        blank=True,
-        null=True)
+    Feature_Code = models.CharField(max_length=100,blank=True,null=True)
+    Feature_Name = models.CharField(max_length=250,blank=True,null=True)
+    Description = models.TextField(blank=True,null=True)
+    Is_Active = models.BooleanField(default=True,blank=True,null=True)
+    Is_Deleted = models.BooleanField(default=False,blank=True,null=True)
+    Created_By = models.ForeignKey(UserAdmin,on_delete=models.CASCADE,related_name='created_product_feature_set',blank=True,null=True)
     Created_Date = models.DateTimeField(default=timezone.now,blank=True,null=True)
     Updated_By = models.ForeignKey(UserAdmin,on_delete=models.CASCADE,related_name='updated_product_feature_set',blank=True,null=True)
     Updated_Date = models.DateTimeField(default=timezone.now,blank=True,null=True)
@@ -1491,10 +1464,6 @@ def ModuleMaster_I():
 
 ##Table for creation of modulemaster
 class ModuleMaster(models.Model):
-    PRODUCT_CHOICES = [
-        ('education', 'Education'),
-        ('retail', 'Retail'),
-        ('it', 'IT'),]
     ModuleMasterId = models.CharField(unique=True, max_length=50, default=ModuleMaster_I)
     Organization_Id = models.ForeignKey(Userorganizationmaster, on_delete=models.CASCADE, blank=True, null=True)
     Module_Code = models.CharField(max_length=100, blank=True, null=True)
@@ -1505,7 +1474,10 @@ class ModuleMaster(models.Model):
 
     # Existing compatibility fields
     Module_key = models.CharField(max_length=100, blank=True, null=True)
-    Product = models.CharField(max_length=50, choices=PRODUCT_CHOICES, blank=True, null=True, default='it')
+    ProductCategory_id = models.ForeignKey(ProductCategory , on_delete=models.CASCADE,blank=True,null=True,related_name='product_categoryname')
+    Product_Edition_id = models.ManyToManyField(ProductEdition,blank=True)
+    ProductFeature_id = models.ManyToManyField(ProductFeature,blank=True)
+    ProductCategory = models.CharField(max_length=50, blank=True, null=True)
     Route = models.CharField(max_length=100, blank=True, null=True)
     Icon = models.CharField(max_length=50, blank=True, null=True)
     Is_active = models.BooleanField(default=True, blank=True, null=True)

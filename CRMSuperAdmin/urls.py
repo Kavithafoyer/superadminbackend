@@ -601,5 +601,6 @@ path('ProductEditionCRUD/', ProductEditionCRUD.as_view(), name='product-edition-
 path('ProductEditionListwithPagination/', ProductEditionListwithPagination.as_view(), name='product-edition-list-paginated'),
 path('ProductEditionSearch/', ProductEditionSearch.as_view(), name='product-edition-search'),
 path('ProductEditionlistwithoutpaginaton/', ProductEditionlistwithoutpaginaton.as_view(), name='product-edition-list-without-pagination'),
+path('Planlistwithoutpaginaton/', Planlistwithoutpaginaton.as_view(), name='plan-list-without-pagination'),
 path('ProductEditionFilter/', ProductEditionFilter.as_view(), name='product-edition-filter'),
 ]

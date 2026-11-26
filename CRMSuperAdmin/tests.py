@@ -40,6 +40,8 @@ from CRMSuperAdmin.views import (
     CustomerKpiDashboardAPI,
     CustomerUsageHealthAnalyticsAPI,
     PartnerKpiDashboardAPI,
+    Planlistwithoutpaginaton,
+    ProductMasterLookupsAPIView,
     ProductPerformanceDashboardAPI,
     RevenueSubscriptionAnalyticsDashboardAPI,
     SystemHealthAlertsDashboardAPI,
@@ -713,3 +715,90 @@ class SystemHealthAlertsDashboardAPITests(SimpleTestCase):
         self.assertTrue(resp.data["status"])
         self.assertEqual(mock_build.call_args[0][0]["date_range"], "custom")
         self.assertEqual(mock_build.call_args[0][0]["service_name"], "Celery")
+
+
+class PlanByEditionListAPITests(SimpleTestCase):
+    """Tests for Planlistwithoutpaginaton API filtering by ProductEdition_id."""
+
+    def setUp(self):
+        self.factory = APIRequestFactory()
+        self.user = SimpleNamespace(is_authenticated=True, pk=1, id=1)
+
+    def test_plan_list_without_pagination_url_resolves(self):
+        url = reverse("plan-list-without-pagination", kwargs={"tenant_name": "default"})
+        self.assertEqual(url, "/default/superadmin/Planlistwithoutpaginaton/")
+        self.assertEqual(resolve(url).func.view_class, Planlistwithoutpaginaton)
+
+    @patch("CRMSuperAdmin.views.Planserializer")
+    @patch("CRMSuperAdmin.views.filter_by_product", side_effect=lambda qs, req: qs)
+    @patch("CRMSuperAdmin.views.Plan")
+    def test_filters_by_edition_pk_id_and_icontains_string(self, mock_plan, mock_filter_prod, mock_ser):
+        view = Planlistwithoutpaginaton.as_view()
+        base_qs = MagicMock()
+        base_qs.filter.return_value = base_qs
+        base_qs.order_by.return_value = []
+        mock_plan.objects.filter.return_value = base_qs
+        mock_ser.return_value.data = [{"id": 1, "Plan_Name": "Starter", "ProductEdition_id": 5}]
+
+        # 1. Numeric PK id
+        req_pk = self.factory.get("/default/superadmin/Planlistwithoutpaginaton/", {"ProductEdition_id": "5"})
+        force_authenticate(req_pk, user=self.user)
+        resp_pk = view(req_pk, tenant_name="default")
+        self.assertEqual(resp_pk.status_code, 200)
+        base_qs.filter.assert_called_with(ProductEdition_id_id=5)
+
+        # 2. String fallback via icontains
+        base_qs.filter.reset_mock()
+        req_str = self.factory.get("/default/superadmin/Planlistwithoutpaginaton/", {"edition": "Enterprise"})
+        force_authenticate(req_str, user=self.user)
+        resp_str = view(req_str, tenant_name="default")
+        self.assertEqual(resp_str.status_code, 200)
+        self.assertTrue(base_qs.filter.called)
+
+
+class ProductMasterLookupsAPITests(SimpleTestCase):
+    """Tests for ProductMasterLookupsAPIView returning ProductCategory name."""
+
+    def setUp(self):
+        self.factory = APIRequestFactory()
+        self.user = SimpleNamespace(is_authenticated=True, pk=1, id=1)
+
+    @patch("CRMSuperAdmin.views.ProductMaster")
+    def test_lookups_include_category_name_from_product_category(self, mock_pm):
+        import json
+
+        cat = SimpleNamespace(id=3, Category_Name="Business Suite")
+        p1 = SimpleNamespace(
+            id=1,
+            Product_Code="CRM",
+            Product_Name="Pegatto CRM",
+            Category_id_id=3,
+            Category_id=cat,
+            Category="Legacy",
+        )
+        p2 = SimpleNamespace(
+            id=2,
+            Product_Code="EDU",
+            Product_Name="Pegatto Education",
+            Category_id_id=None,
+            Category_id=None,
+            Category="Education",
+        )
+        qs = MagicMock()
+        qs.filter.return_value = qs
+        qs.order_by.return_value = [p1, p2]
+        mock_pm.objects.select_related.return_value = qs
+
+        req = self.factory.get("/default/superadmin/ProductMasterLookups/")
+        force_authenticate(req, user=self.user)
+        resp = ProductMasterLookupsAPIView.as_view()(req, tenant_name="default")
+
+        self.assertEqual(resp.status_code, 200)
+        body = json.loads(resp.content)
+        self.assertTrue(body["status"])
+        self.assertEqual(body["count"], 2)
+        self.assertEqual(body["results"][0]["Category_id"], 3)
+        self.assertEqual(body["results"][0]["Category_Name"], "Business Suite")
+        self.assertEqual(body["results"][0]["Category"], "Business Suite")
+        self.assertEqual(body["results"][1]["Category_id"], None)
+        self.assertEqual(body["results"][1]["Category_Name"], "Education")
