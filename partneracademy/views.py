@@ -3437,3 +3437,1034 @@ class PartnerDashboard(APIView):
 
 
 
+# techincal document
+
+
+# ==========================================================
+# TECHNICAL DOCUMENTATION - CLOUDFLARE R2
+# Separate from Training Videos
+# Done by Shajitha
+# ==========================================================
+
+import os
+import uuid
+
+from django.conf import settings
+from django.db import transaction
+from django.http import HttpResponse
+from rest_framework import status
+from rest_framework.parsers import JSONParser, FormParser, MultiPartParser
+from rest_framework.renderers import JSONRenderer
+from rest_framework.views import APIView
+
+
+# Allowed document formats and their MIME types
+DOCUMENT_CONTENT_TYPES = {
+    "pdf": "application/pdf",
+    "doc": "application/msword",
+    "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "ppt": "application/vnd.ms-powerpoint",
+    "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "xls": "application/vnd.ms-excel",
+    "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "txt": "text/plain",
+    "csv": "text/csv",
+    "jpg": "image/jpeg",
+    "jpeg": "image/jpeg",
+    "png": "image/png",
+}
+
+
+DOCUMENT_UPLOAD_EXPIRES = 3600
+
+
+def _document_upload_info(file_name, file_size):
+    """Validate the document filename, extension and declared size."""
+
+    file_name = os.path.basename((file_name or "").strip())
+
+    if not file_name:
+        return None, "File_Name is required"
+
+    ext = os.path.splitext(file_name)[1].lower().lstrip(".")
+
+    if ext not in DOCUMENT_CONTENT_TYPES:
+        return None, "Allowed formats: PDF, DOC, DOCX, PPT, PPTX, XLS, XLSX, TXT, CSV, JPG and PNG"
+
+    try:
+        file_size = int(file_size)
+    except (TypeError, ValueError):
+        return None, "File_Size must be a valid number"
+
+    if file_size <= 0:
+        return None, "File_Size must be greater than zero"
+
+    max_bytes = getattr(
+        settings,
+        "TECHNICAL_DOCUMENTATION_MAX_BYTES",
+        100 * 1024 * 1024
+    )
+
+    if file_size > max_bytes:
+        return None, f"Maximum document size is {max_bytes // (1024 * 1024)} MB"
+
+    return {
+        "File_Name": file_name,
+        "File_Size": file_size,
+        "Extension": ext,
+        "Content_Type": DOCUMENT_CONTENT_TYPES[ext],
+    }, None
+
+
+def _document_key(document_id, extension):
+    """Generate a unique object key in the R2 technical-documentation folder."""
+
+    return (
+        f"technical-documentation/{document_id}/"
+        f"{uuid.uuid4().hex}.{extension}"
+    )
+
+
+def _document_presigned_put(key, content_type):
+    """Generate a temporary direct-upload URL for Cloudflare R2."""
+
+    storage = _storage()
+    client = storage.bucket.meta.client
+
+    return client.generate_presigned_url(
+        "put_object",
+        Params={
+            "Bucket": storage.bucket_name,
+            "Key": key,
+            "ContentType": content_type,
+        },
+        ExpiresIn=DOCUMENT_UPLOAD_EXPIRES,
+    )
+
+
+def _document_upload_response(key, content_type):
+    return {
+        "Upload_URL": _document_presigned_put(key, content_type),
+        "Upload_Method": "PUT",
+        "Upload_Headers": {
+            "Content-Type": content_type
+        },
+        "Expires_In_Seconds": DOCUMENT_UPLOAD_EXPIRES,
+        "Next_Step": (
+            "Upload the file to Upload_URL using PUT, "
+            "then call TechnicalDocumentationDirectUploadFinish/"
+        ),
+    }
+
+
+def _get_document(document_id):
+    if not document_id:
+        return None
+
+    return TechnicalDocumentation.objects.filter(
+        id=document_id,
+        Is_Deleted=False
+    ).first()
+
+
+def _document_response(document):
+    """Return document data with a temporary R2 download URL."""
+
+    data = TechnicalDocumentationSerializers(document).data
+
+    if document.Document_File:
+        try:
+            data["Document_URL"] = _storage().url(document.Document_File)
+        except Exception:
+            data["Document_URL"] = None
+    else:
+        data["Document_URL"] = None
+
+    return data
+
+
+# ==========================================================
+# 1. POST - TechnicalDocumentationSave/
+# Create document record and generate R2 upload URL
+# ==========================================================
+
+class TechnicalDocumentationSave(APIView):
+    parser_classes = [JSONParser, MultiPartParser, FormParser]
+
+    def post(self, request, *args, **kwargs):
+        try:
+            data = request.data
+
+            file_name = data.get("File_Name")
+            file_size = data.get("File_Size")
+
+            file_info, error = _document_upload_info(file_name, file_size)
+
+            if error:
+                return _error(error)
+
+            user = _user(request)
+
+            created_by = user.id if user else (int(data["Created_By"]) if data.get("Created_By") and str(data["Created_By"]).isdigit() else None)
+            updated_by = user.id if user else (int(data["Updated_By"]) if data.get("Updated_By") and str(data["Updated_By"]).isdigit() else None)
+            partner_id = int(data["Partner_Id"]) if data.get("Partner_Id") and str(data["Partner_Id"]).isdigit() else None
+            user_id = int(data["User_Id"]) if data.get("User_Id") and str(data["User_Id"]).isdigit() else None
+
+            document_data = {
+                "Product_Id": data.get("Product_Id"),
+                "Products": data.get("Products", 0),
+                "Product_Name": data.get("Product_Name"),
+                "Module_Name": data.get("Module_Name"),
+                "Document_Type": data.get("Document_Type"),
+                "Document_Title": data.get("Document_Title"),
+                "Document_Code": data.get("Document_Code"),
+                "Category": data.get("Category"),
+                "Description": data.get("Description"),
+                "Original_Filename": file_info["File_Name"],
+                "File_Type": file_info["Extension"],
+                "File_Size_Bytes": file_info["File_Size"],
+                "Version": data.get("Version", "1.0"),
+                "Status": data.get("Status", "Draft"),
+                "Remarks": data.get("Remarks"),
+                "Created_By": created_by,
+                "Updated_By": updated_by,
+                "Partner_Id": partner_id,
+                "Customer_Id": data.get("Customer_Id"),
+                "PartnerTeamMember_Id": data.get("PartnerTeamMember_Id"),
+                "User_Id": user_id,
+            }
+
+            serializer = TechnicalDocumentationSerializer(data=document_data)
+
+            if not serializer.is_valid():
+                return _reply(serializer.errors, status.HTTP_400_BAD_REQUEST)
+
+            with transaction.atomic():
+                document = serializer.save()
+
+                key = _document_key(
+                    document.id,
+                    file_info["Extension"]
+                )
+
+                document.Document_File = key
+                document.save(update_fields=["Document_File"])
+
+            response_data = {
+                "Message": "Document record created. Upload the file to Cloudflare R2.",
+                "id": document.id,
+                "Documentation_Id": document.Documentation_Id,
+                **_document_upload_response(
+                    key,
+                    file_info["Content_Type"]
+                ),
+            }
+
+            return _reply(response_data, status.HTTP_201_CREATED)
+
+        except Exception as e:
+            return _error(str(e))
+
+
+# ==========================================================
+# 2. GET - TechnicalDocumentationGet/
+# Get one document or list documents
+# ==========================================================
+
+class TechnicalDocumentationGet(APIView):
+
+    def get(self, request, *args, **kwargs):
+        try:
+            params = request.query_params
+
+            if params.get("id"):
+                document = _get_document(params.get("id"))
+
+                if not document:
+                    return _error(
+                        "Document not found",
+                        status.HTTP_404_NOT_FOUND
+                    )
+
+                return _reply(_document_response(document))
+
+            queryset = TechnicalDocumentation.objects.filter(
+                Is_Deleted=False
+            ).order_by("-id")
+
+            # Filters
+            if params.get("Product_Id"):
+                queryset = queryset.filter(
+                    Product_Id_id=params.get("Product_Id")
+                )
+
+            if params.get("Product_Name"):
+                queryset = queryset.filter(
+                    Product_Name__icontains=params.get("Product_Name")
+                )
+
+            if params.get("Module_Name"):
+                queryset = queryset.filter(
+                    Module_Name__icontains=params.get("Module_Name")
+                )
+
+            if params.get("Category"):
+                queryset = queryset.filter(
+                    Category__icontains=params.get("Category")
+                )
+
+            if params.get("Document_Type"):
+                queryset = queryset.filter(
+                    Document_Type__icontains=params.get("Document_Type")
+                )
+
+            if params.get("Status"):
+                queryset = queryset.filter(
+                    Status=params.get("Status")
+                )
+
+            if params.get("search"):
+                search = params.get("search")
+
+                queryset = queryset.filter(
+                    Q(Document_Title__icontains=search) |
+                    Q(Document_Code__icontains=search) |
+                    Q(Product_Name__icontains=search) |
+                    Q(Module_Name__icontains=search) |
+                    Q(Category__icontains=search) |
+                    Q(Original_Filename__icontains=search)
+                )
+
+            result = [
+                _document_response(document)
+                for document in queryset
+            ]
+
+            return _reply({
+                "Count": len(result),
+                "Data": result
+            })
+
+        except Exception as e:
+            return _error(str(e))
+
+
+# ==========================================================
+# 3. PATCH - TechnicalDocumentationUpdate/
+# Update metadata or request a replacement file upload
+# ==========================================================
+
+class TechnicalDocumentationUpdate(APIView):
+    parser_classes = [JSONParser, MultiPartParser, FormParser]
+
+    def patch(self, request, *args, **kwargs):
+        try:
+            data = request.data
+
+            document = _get_document(data.get("id"))
+
+            if not document:
+                return _error(
+                    "Document not found",
+                    status.HTTP_404_NOT_FOUND
+                )
+
+            user = _user(request)
+
+            editable_fields = [
+                "Product_Id",
+                "Products",
+                "Product_Name",
+                "Module_Name",
+                "Document_Type",
+                "Document_Title",
+                "Document_Code",
+                "Category",
+                "Description",
+                "Version",
+                "Status",
+                "Remarks",
+                "Partner_Id",
+                "Customer_Id",
+                "PartnerTeamMember_Id",
+                "User_Id",
+            ]
+
+            update_data = {}
+
+            for field in editable_fields:
+                if field in data:
+                    update_data[field] = data.get(field)
+
+            if user:
+                update_data["Updated_By"] = user.id
+
+            serializer = TechnicalDocumentationSerializer(
+                document,
+                data=update_data,
+                partial=True
+            )
+
+            if not serializer.is_valid():
+                return _reply(
+                    serializer.errors,
+                    status.HTTP_400_BAD_REQUEST
+                )
+
+            serializer.save()
+
+            # Optional: replace the existing file
+            if data.get("File_Name") or data.get("File_Size"):
+
+                file_info, error = _document_upload_info(
+                    data.get("File_Name"),
+                    data.get("File_Size")
+                )
+
+                if error:
+                    return _error(error)
+
+                new_key = _document_key(
+                    document.id,
+                    file_info["Extension"]
+                )
+
+                document.Pending_Document_File = new_key
+                document.save(update_fields=["Pending_Document_File"])
+
+                return _reply({
+                    "Message": "Document details updated. Upload the replacement file.",
+                    "id": document.id,
+                    **_document_upload_response(
+                        new_key,
+                        file_info["Content_Type"]
+                    ),
+                })
+
+            return _reply({
+                "Message": "Document updated successfully",
+                "Data": _document_response(document)
+            })
+
+        except Exception as e:
+            return _error(str(e))
+
+    # Also support PUT
+    def put(self, request, *args, **kwargs):
+        return self.patch(request, *args, **kwargs)
+
+
+# ==========================================================
+# 4. DELETE - TechnicalDocumentationDelete/
+# Soft delete database record and remove R2 file
+# ==========================================================
+
+class TechnicalDocumentationDelete(APIView):
+    parser_classes = [JSONParser, FormParser, MultiPartParser]
+
+    def delete(self, request, *args, **kwargs):
+        try:
+            document_id = (
+                request.query_params.get("id") or
+                request.data.get("id")
+            )
+
+            document = _get_document(document_id)
+
+            if not document:
+                return _error(
+                    "Document not found",
+                    status.HTTP_404_NOT_FOUND
+                )
+
+            storage = _storage()
+
+            # Delete current R2 object
+            if document.Document_File:
+                try:
+                    storage.delete(document.Document_File)
+                except Exception:
+                    pass
+
+            # Delete pending replacement object, if any
+            if document.Pending_Document_File:
+                try:
+                    storage.delete(document.Pending_Document_File)
+                except Exception:
+                    pass
+
+            document.Is_Deleted = True
+            document.Updated_By = _user(request)
+            document.save()
+
+            return _reply({
+                "Message": "Document deleted successfully",
+                "id": document.id,
+                "Is_Deleted": True
+            })
+
+        except Exception as e:
+            return _error(str(e))
+
+    # Also support POST with id
+    def post(self, request, *args, **kwargs):
+        return self.delete(request, *args, **kwargs)
+
+
+# ==========================================================
+# 5. POST - TechnicalDocumentationDirectUploadFinish/
+# Verify R2 upload and complete document save/update
+# ==========================================================
+
+class TechnicalDocumentationDirectUploadFinish(APIView):
+    parser_classes = [JSONParser, FormParser, MultiPartParser]
+
+    def post(self, request, *args, **kwargs):
+        try:
+            data = request.data
+
+            document = _get_document(data.get("id"))
+
+            if not document:
+                return _error(
+                    "Document not found",
+                    status.HTTP_404_NOT_FOUND
+                )
+
+            # During replacement, verify the pending key.
+            # During initial upload, verify Document_File.
+            new_key = document.Pending_Document_File or document.Document_File
+
+            if not new_key:
+                return _error("No document upload is pending")
+
+            # Only accept keys belonging to this document.
+            expected_prefix = f"technical-documentation/{document.id}/"
+
+            if not new_key.startswith(expected_prefix):
+                return _error("Invalid document storage path")
+
+            storage = _storage()
+            client = storage.bucket.meta.client
+
+            try:
+                result = client.head_object(
+                    Bucket=storage.bucket_name,
+                    Key=new_key
+                )
+            except Exception:
+                return _error(
+                    "File not found in Cloudflare R2. Upload the file first."
+                )
+
+            actual_size = result.get("ContentLength", 0)
+            actual_content_type = result.get("ContentType", "")
+
+            max_bytes = getattr(
+                settings,
+                "TECHNICAL_DOCUMENTATION_MAX_BYTES",
+                100 * 1024 * 1024
+            )
+
+            if actual_size <= 0:
+                return _error("Uploaded document is empty")
+
+            if actual_size > max_bytes:
+                try:
+                    storage.delete(new_key)
+                except Exception:
+                    pass
+
+                return _error(
+                    f"File is too large. Maximum is {max_bytes // (1024 * 1024)} MB"
+                )
+
+            # Confirm the uploaded Content-Type matches the allowed extension.
+            ext = os.path.splitext(document.Original_Filename or "")[1]
+            ext = ext.lower().lstrip(".")
+
+            expected_content_type = DOCUMENT_CONTENT_TYPES.get(ext)
+
+            # For replacement, get the extension from the pending key.
+            if document.Pending_Document_File:
+                ext = os.path.splitext(new_key)[1].lower().lstrip(".")
+                expected_content_type = DOCUMENT_CONTENT_TYPES.get(ext)
+
+            if (
+                not expected_content_type or
+                actual_content_type != expected_content_type
+            ):
+                return _error("Uploaded file Content-Type does not match the document format")
+
+            user = _user(request)
+
+            with transaction.atomic():
+
+                # Remove old file only after the new file is verified.
+                if document.Pending_Document_File:
+                    old_key = document.Document_File
+
+                    document.Document_File = document.Pending_Document_File
+                    document.Pending_Document_File = None
+
+                    document.Original_Filename = data.get(
+                        "File_Name",
+                        document.Original_Filename
+                    )
+
+                    document.File_Type = ext
+                    document.File_Size_Bytes = actual_size
+
+                    document.Updated_By = user
+                    document.save()
+
+                    if old_key and old_key != document.Document_File:
+                        try:
+                            storage.delete(old_key)
+                        except Exception:
+                            pass
+
+                else:
+                    document.File_Size_Bytes = actual_size
+                    document.Updated_By = user
+                    document.save()
+
+            return _reply({
+                "Message": "Document uploaded and verified successfully",
+                "id": document.id,
+                "Documentation_Id": document.Documentation_Id,
+                "File_Size_Bytes": actual_size,
+                "Status": document.Status,
+                "Data": _document_response(document)
+            })
+
+        except Exception as e:
+            return _error(str(e))
+
+
+# tech doc view page alone
+
+from collections import defaultdict
+
+
+
+# ==========================================================
+# 6. GET - TechnicalDocumentationProductModuleView/
+# Display documents Product-wise and Module-wise
+# Done by Shajitha
+# ==========================================================
+
+class TechnicalDocumentationProductModuleView(APIView):
+
+    def get(self, request, *args, **kwargs):
+        try:
+            params = request.query_params
+
+            queryset = TechnicalDocumentation.objects.filter(
+                Is_Deleted=False,
+                Status="Published"
+            ).order_by("Product_Name", "Module_Name", "-id")
+
+            # Product filter
+            if params.get("Product_Id"):
+                queryset = queryset.filter(
+                    Product_Id_id=params.get("Product_Id")
+                )
+
+            # Module filter
+            if params.get("Module_Name"):
+                queryset = queryset.filter(
+                    Module_Name__icontains=params.get("Module_Name")
+                )
+
+            # Group documents product-wise and module-wise
+            products = {}
+
+            for document in queryset:
+
+                product_id = document.Product_Id_id
+                product_name = document.Product_Name or "Unknown Product"
+                module_name = document.Module_Name or "General"
+
+                if product_id not in products:
+                    products[product_id] = {
+                        "Product_Id": product_id,
+                        "Product_Name": product_name,
+                        "Modules": {}
+                    }
+
+                if module_name not in products[product_id]["Modules"]:
+                    products[product_id]["Modules"][module_name] = {
+                        "Module_Name": module_name,
+                        "Documents": []
+                    }
+
+                products[product_id]["Modules"][module_name]["Documents"].append(
+                    _document_response(document)
+                )
+
+            result = []
+
+            for product in products.values():
+                product["Modules"] = list(product["Modules"].values())
+                result.append(product)
+
+            return _reply({
+                "Message": "Technical documentation retrieved successfully",
+                "Count": len(result),
+                "Data": result
+            })
+
+        except Exception as e:
+            return _error(str(e))
+
+
+
+# 1. Get all products and modules
+# GET /TechnicalDocumentationProductModuleView/
+
+
+# Payload: None.
+# 2. Get documents for a specific product
+# GET /TechnicalDocumentationProductModuleView/?Product_Id=1
+
+
+# Payload: None.
+# 3. Get documents for a specific product and module
+# GET /TechnicalDocumentationProductModuleView/?Product_Id=1&Module_Name=CRM
+
+
+# Payload: None.
+
+
+from django.db.models import Q
+from django.http import HttpResponse
+from rest_framework import status
+from rest_framework.generics import ListAPIView
+from rest_framework.renderers import JSONRenderer
+from rest_framework.views import APIView
+
+# from .models import PartnerFAQ
+# from .serializers import PartnerFAQSerializer, PartnerFAQSerializers
+
+
+class PartnerFAQCRUD(APIView):
+
+    # POST - Create FAQ
+    def post(self, request, *args, **kwargs):
+        try:
+            data = request.data
+            serialize = PartnerFAQSerializer(data=data)
+
+            if serialize.is_valid():
+                serialize.save()
+                output = JSONRenderer().render(serialize.data)
+                return HttpResponse(
+                    output,
+                    content_type="application/json",
+                    status=status.HTTP_201_CREATED
+                )
+
+            output = JSONRenderer().render(serialize.errors)
+            return HttpResponse(
+                output,
+                content_type="application/json",
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        except Exception as e:
+            output = JSONRenderer().render({"Error": str(e)})
+            return HttpResponse(
+                output,
+                content_type="application/json",
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+    # GET - Get FAQ by ID
+    def get(self, request, *args, **kwargs):
+        try:
+            data = request.query_params
+            module = PartnerFAQ.objects.get(
+                id=data['id'],
+                Is_Deleted=False
+            )
+
+            serialize = PartnerFAQSerializers(module)
+            output = JSONRenderer().render(serialize.data)
+
+            return HttpResponse(
+                output,
+                content_type="application/json",
+                status=status.HTTP_200_OK
+            )
+
+        except Exception as e:
+            output = JSONRenderer().render({"Error": str(e)})
+            return HttpResponse(
+                output,
+                content_type="application/json",
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+    # PUT - Full Update
+    def put(self, request, *args, **kwargs):
+        try:
+            data = request.data
+            module = PartnerFAQ.objects.get(
+                id=data['id'],
+                Is_Deleted=False
+            )
+
+            serialize = PartnerFAQSerializer(
+                instance=module,
+                data=data
+            )
+
+            if serialize.is_valid():
+                serialize.save()
+                output = JSONRenderer().render(serialize.data)
+                return HttpResponse(
+                    output,
+                    content_type="application/json",
+                    status=status.HTTP_200_OK
+                )
+
+            output = JSONRenderer().render(serialize.errors)
+            return HttpResponse(
+                output,
+                content_type="application/json",
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        except Exception as e:
+            output = JSONRenderer().render({"Error": str(e)})
+            return HttpResponse(
+                output,
+                content_type="application/json",
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+    # PATCH - Partial Update
+    def patch(self, request, *args, **kwargs):
+        try:
+            data = request.data
+            module = PartnerFAQ.objects.get(
+                id=data['id'],
+                Is_Deleted=False
+            )
+
+            serialize = PartnerFAQSerializer(
+                instance=module,
+                data=data,
+                partial=True
+            )
+
+            if serialize.is_valid():
+                serialize.save()
+                output = JSONRenderer().render(serialize.data)
+                return HttpResponse(
+                    output,
+                    content_type="application/json",
+                    status=status.HTTP_200_OK
+                )
+
+            output = JSONRenderer().render(serialize.errors)
+            return HttpResponse(
+                output,
+                content_type="application/json",
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        except Exception as e:
+            output = JSONRenderer().render({"Error": str(e)})
+            return HttpResponse(
+                output,
+                content_type="application/json",
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+    # DELETE - Soft Delete
+    def delete(self, request, *args, **kwargs):
+        try:
+            data = request.query_params
+
+            module = PartnerFAQ.objects.get(
+                id=data['id'],
+                Is_Deleted=False
+            )
+
+            module.Is_Deleted = True
+            module.save(update_fields=['Is_Deleted'])
+
+            serialize = PartnerFAQSerializer(module)
+            output = JSONRenderer().render(serialize.data)
+
+            return HttpResponse(
+                output,
+                content_type="application/json",
+                status=status.HTTP_200_OK
+            )
+
+        except Exception as e:
+            output = JSONRenderer().render({"Error": str(e)})
+            return HttpResponse(
+                output,
+                content_type="application/json",
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+
+# done by shajitha
+class PartnerFAQListWithoutPagination(ListAPIView):
+
+    def get(self, request, *args, **kwargs):
+        try:
+            data = request.query_params
+            audience = data.get('audience')
+            role = data.get('role')
+
+            module = PartnerFAQ.objects.filter(
+                Is_Deleted=False
+            ).order_by('Display_Order', '-id')
+
+            # portal side - only active FAQs of that audience
+            if audience == 'partner':
+                module = module.filter(Show_To_Partner=True, Is_Active=True)
+
+            elif audience == 'team_member':
+                module = module.filter(Show_To_Team_Member=True, Is_Active=True)
+
+            elif audience == 'user':
+                module = module.filter(Show_To_User=True, Is_Active=True)
+
+                if role:
+                    module = module.filter(
+                        Q(Visible_User_Roles=[]) |
+                        Q(Visible_User_Roles__isnull=True) |
+                        Q(Visible_User_Roles__contains=[role])
+                    )
+                else:
+                    module = module.filter(
+                        Q(Visible_User_Roles=[]) |
+                        Q(Visible_User_Roles__isnull=True)
+                    )
+
+            serialize = PartnerFAQSerializers(
+                module,
+                many=True
+            )
+
+            output = JSONRenderer().render(serialize.data)
+
+            return HttpResponse(
+                output,
+                content_type='application/json',
+                status=status.HTTP_200_OK
+            )
+
+        except Exception as e:
+            output = JSONRenderer().render({"Error": str(e)})
+            return HttpResponse(
+                output,
+                content_type='application/json',
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+
+# done by shajitha
+class PartnerFAQListWithPagination(ListAPIView):
+
+    queryset = PartnerFAQ.objects.all()
+    serializer_class = PartnerFAQSerializers
+
+    def get_queryset(self):
+        try:
+            audience = self.request.GET.get('audience')
+            role = self.request.GET.get('role')
+
+            module = PartnerFAQ.objects.filter(
+                Is_Deleted=False
+            ).order_by('Display_Order', '-id')
+
+            if audience == 'partner':
+                module = module.filter(Show_To_Partner=True, Is_Active=True)
+
+            elif audience == 'team_member':
+                module = module.filter(Show_To_Team_Member=True, Is_Active=True)
+
+            elif audience == 'user':
+                module = module.filter(Show_To_User=True, Is_Active=True)
+
+                if role:
+                    module = module.filter(
+                        Q(Visible_User_Roles=[]) |
+                        Q(Visible_User_Roles__isnull=True) |
+                        Q(Visible_User_Roles__contains=[role])
+                    )
+                else:
+                    module = module.filter(
+                        Q(Visible_User_Roles=[]) |
+                        Q(Visible_User_Roles__isnull=True)
+                    )
+
+            return module
+
+        except Exception as e:
+            import traceback
+            print(traceback.format_exc())
+            return PartnerFAQ.objects.none()
+
+
+# done by shajitha
+class PartnerFAQSearch(ListAPIView):
+
+    queryset = PartnerFAQ.objects.all()
+    serializer_class = PartnerFAQSerializers
+
+    def get_queryset(self):
+        try:
+            data = self.request.GET.get('search', '')
+            audience = self.request.GET.get('audience')
+            role = self.request.GET.get('role')
+
+            module = PartnerFAQ.objects.filter(
+                (
+                    Q(PartnerFAQ_Id__icontains=data) |
+                    Q(Category_Name__icontains=data) |
+                    Q(Question__icontains=data) |
+                    Q(Answer__icontains=data) |
+                    Q(Short_Description__icontains=data)
+                ) &
+                Q(Is_Deleted=False)
+            ).order_by('Display_Order', '-id')
+
+            if audience == 'partner':
+                module = module.filter(Show_To_Partner=True, Is_Active=True)
+
+            elif audience == 'team_member':
+                module = module.filter(Show_To_Team_Member=True, Is_Active=True)
+
+            elif audience == 'user':
+                module = module.filter(Show_To_User=True, Is_Active=True)
+
+                if role:
+                    module = module.filter(
+                        Q(Visible_User_Roles=[]) |
+                        Q(Visible_User_Roles__isnull=True) |
+                        Q(Visible_User_Roles__contains=[role])
+                    )
+                else:
+                    module = module.filter(
+                        Q(Visible_User_Roles=[]) |
+                        Q(Visible_User_Roles__isnull=True)
+                    )
+
+            return module
+
+        except Exception as e:
+            raise Exception(
+                f"Error while searching PartnerFAQ: {str(e)}"
+            )
+
+
+

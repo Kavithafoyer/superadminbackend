@@ -29,6 +29,7 @@ load_dotenv()
 
 
 key =config("key")
+
 # key = config('key', default=None)
 # if not key:
 #     raise Exception("Environment variable 'key' is required in production")
@@ -250,19 +251,16 @@ WSGI_APPLICATION = 'CRM.wsgi.application'
 
 # local db
 
-# DATABASES = {
-# 'default': {
-#         "ENGINE":"django.db.backends.postgresql_psycopg2",
-#         "NAME":"pegattosuperadmin",
-#         "NAME":"SUPERADMIN_DB",
-#         "USER":"postgres",
-#         "PASSWORD":"123",
-#         "PASSWORD":"123",
-#         "PASSWORD":"Foyer@123",
-#         "HOST":"localhost",
-#         "PORT":"5432"
 
-#         }
+# DATABASES = {
+
+#         'default': {
+#         'NAME': 'SUPERADMINDB',
+#         'ENGINE': 'django.db.backends.postgresql_psycopg2',
+#         'USER': 'postgres',
+#         'PASSWORD': '1213',
+#         'HOST': '127.0.0.1',
+#     }
 # }
 
 

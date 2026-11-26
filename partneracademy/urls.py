@@ -89,4 +89,51 @@ urlpatterns = [
     path('PartnerCertificateView/', PartnerCertificateView.as_view()),
     path('PartnerDashboard/', PartnerDashboard.as_view()),
 
+
+
+    path(
+    'TechnicalDocumentationSave/',
+    TechnicalDocumentationSave.as_view(),
+    name='TechnicalDocumentationSave'
+),
+
+path(
+    'TechnicalDocumentationGet/',
+    TechnicalDocumentationGet.as_view(),
+    name='TechnicalDocumentationGet'
+),
+
+path(
+    'TechnicalDocumentationUpdate/',
+    TechnicalDocumentationUpdate.as_view(),
+    name='TechnicalDocumentationUpdate'
+),
+
+path(
+    'TechnicalDocumentationDelete/',
+    TechnicalDocumentationDelete.as_view(),
+    name='TechnicalDocumentationDelete'
+),
+
+path(
+    'TechnicalDocumentationDirectUploadFinish/',
+    TechnicalDocumentationDirectUploadFinish.as_view(),
+    name='TechnicalDocumentationDirectUploadFinish'
+),
+
+
+path(
+    'TechnicalDocumentationProductModuleView/',
+    TechnicalDocumentationProductModuleView.as_view(),
+    name='TechnicalDocumentationProductModuleView'
+),
+
+
+path('PartnerFAQCRUD/', PartnerFAQCRUD.as_view()),
+path('PartnerFAQListWithoutPagination/', PartnerFAQListWithoutPagination.as_view()),
+path('PartnerFAQListWithPagination/', PartnerFAQListWithPagination.as_view()),
+path('PartnerFAQSearch/', PartnerFAQSearch.as_view()),
+
+
+
 ]

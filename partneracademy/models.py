@@ -89,6 +89,8 @@ class TrainingVideo(models.Model):
         db_table = "TrainingVideo"
 
 
+
+
 def Enrollment_Id_I():
     last = ModuleEnrollment.objects.all().order_by('id').last()
     if not last:
@@ -266,4 +268,80 @@ class AcademyNotification(models.Model):
     class Meta:
         db_table = "AcademyNotification"
 
+
+from CRMSuperAdmin.models import *
+
+def Documentation_Id_I():
+    last = TechnicalDocumentation.objects.all().order_by('id').last()
+
+    if not last:
+        return "TDD000000001"
+
+    number = int(last.Documentation_Id[3:])
+    return "TDD" + str(number + 1).zfill(9)
+
+
+class TechnicalDocumentation(models.Model):
+    Documentation_Id = models.CharField(max_length=1000, unique=True, default=Documentation_Id_I, blank=True, null=True)
+    Product_Id = models.ForeignKey(ProductMaster, on_delete=models.CASCADE, related_name='products', blank=True, null=True)
+    Products = models.IntegerField(default=0, blank=True, null=True)
+    Product_Name = models.CharField(max_length=1000, blank=True, null=True)
+    Module_Name = models.CharField(max_length=1000, blank=True, null=True)
+    Document_Type = models.CharField(max_length=1000, blank=True, null=True)
+    Document_Title = models.CharField(max_length=1000, blank=True, null=True)
+    Document_Code = models.CharField(max_length=1000, blank=True, null=True)
+    Category = models.CharField(max_length=1000, blank=True, null=True)
+    Description = models.TextField(blank=True, null=True)
+    Document_File = models.CharField(max_length=2000, blank=True, null=True)
+    Pending_Document_File = models.CharField(max_length=2000, blank=True, null=True)
+    Original_Filename = models.CharField(max_length=255, blank=True, null=True)
+    File_Type = models.CharField(max_length=100, blank=True, null=True)
+    File_Size_Bytes = models.BigIntegerField(blank=True, null=True)
+    Version = models.CharField(max_length=100, default='1.0', blank=True, null=True)
+    Status = models.CharField(max_length=100, default='Draft', blank=True, null=True)
+    Remarks = models.CharField(max_length=1000, blank=True, null=True)
+    Is_Deleted = models.BooleanField(default=False, blank=True, null=True)
+    Created_Date = models.DateTimeField(auto_now_add=True, blank=True, null=True)
+    Updated_Date = models.DateTimeField(auto_now=True, blank=True, null=True)
+    Created_By = models.ForeignKey(User, on_delete=models.CASCADE, related_name='createdTechnicalDocumentation', blank=True, null=True)
+    Updated_By = models.ForeignKey(User, on_delete=models.CASCADE, related_name='updatedTechnicalDocumentation', blank=True, null=True)
+    Partner_Id = models.ForeignKey(Partner, on_delete=models.CASCADE, related_name='partner_tech', blank=True, null=True)
+    Customer_Id = models.ForeignKey(Account, on_delete=models.CASCADE, related_name='customer_tech', blank=True, null=True)
+    PartnerTeamMember_Id = models.ForeignKey(PartnerTeamMember, on_delete=models.CASCADE, related_name='partnerteammember_tech', blank=True, null=True)
+    User_Id = models.ForeignKey(User, on_delete=models.CASCADE, related_name='Techincal_user', blank=True, null=True)
+
+    class Meta:
+        db_table = "TechnicalDocumentation"
+
+def PartnerFAQ_Id_I():
+    last = PartnerFAQ.objects.all().order_by('id').last()
+
+    if not last:
+        return "FAQ000000001"
+
+    number = int(last.PartnerFAQ_Id[3:])
+    return "FAQ" + str(number + 1).zfill(9)
+
+
+class PartnerFAQ(models.Model):
+
+    PartnerFAQ_Id = models.CharField(max_length=1000, unique=True, default=PartnerFAQ_Id_I, blank=True, null=True)
+    Category_Name = models.CharField(max_length=255, blank=True, null=True)
+    Question = models.CharField(max_length=500, blank=True, null=True)
+    Answer = models.TextField(blank=True, null=True)
+    Short_Description = models.TextField(blank=True, null=True)
+    Display_Order = models.PositiveIntegerField(default=0, blank=True, null=True)
+    Is_Active = models.BooleanField(default=True, blank=True, null=True)
+    Is_Deleted = models.BooleanField(default=False, blank=True, null=True)
+    Created_Date = models.DateTimeField(auto_now_add=True, blank=True, null=True)
+    Modified_Date = models.DateTimeField(auto_now=True, blank=True, null=True)
+    Created_By = models.ForeignKey(User, on_delete=models.CASCADE, related_name='createdFAQ', blank=True, null=True)
+    Updated_By = models.ForeignKey(User, on_delete=models.CASCADE, related_name='updatedFAQ', blank=True, null=True)
+    Show_To_Partner = models.BooleanField(default=True, blank=True, null=True)
+    Show_To_Team_Member = models.BooleanField(default=False, blank=True, null=True)
+    Show_To_User = models.BooleanField(default=False, blank=True, null=True)
+    Visible_User_Roles = models.JSONField(default=list, blank=True, null=True)
+    
+    class Meta:
+        db_table = 'PartnerFAQ'
 
