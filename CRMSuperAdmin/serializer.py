@@ -2,6 +2,7 @@ import json
 import time
 from pyexpat import model
 from rest_framework import serializers
+from django.db import transaction
 from django.db.models import Q
 from django.contrib.auth.models import Group, Permission
 from .models import *
@@ -11,6 +12,80 @@ from CRMUserAdmin.models import *
 
 
 class Addonserializer(serializers.ModelSerializer):
+    Product_Compatibility_Type = serializers.ChoiceField(
+        choices=('compatible', 'incompatible'), required=False, write_only=True,
+    )
+
+    @transaction.atomic
+    def create(self, validated_data):
+        rule_type = validated_data.pop('Product_Compatibility_Type', 'compatible')
+        products = validated_data.get('Products', [])
+        addon = super().create(validated_data)
+        self.sync_product_rules(addon, products, set(), rule_type)
+        return addon
+
+    @transaction.atomic
+    def update(self, instance, validated_data):
+        addon = AddonMaster.objects.select_for_update().get(pk=instance.pk)
+        products = validated_data.get('Products')
+        previous_ids = set(addon.Products.values_list('pk', flat=True)) if products is not None else set()
+        addon = super().update(addon, validated_data)
+        if products is not None:
+            self.sync_product_rules(addon, products, previous_ids, 'compatible')
+        return addon
+
+    def sync_product_rules(self, addon, products, previous_ids, rule_type):
+        selected = {product.pk: product for product in products}
+        if not (selected or previous_ids):
+            return
+        request = self.context.get('request')
+        user = getattr(request, 'user', None)
+        actor_id = user.pk if getattr(user, 'is_authenticated', False) else addon.Updated_By_id or addon.Created_By_id
+        if not actor_id:
+            raise serializers.ValidationError({'Products': 'A valid user is required to update compatibility rules.'})
+
+        today = timezone.localdate()
+        rules = {rule.Product_id: rule for rule in AddonProductCompatibility.objects.select_for_update().filter(
+            Addon=addon, Product_id__in=selected.keys() | previous_ids,
+        )}
+        for product_id in previous_ids - selected.keys():
+            rule = rules.get(product_id)
+            if rule and not rule.Is_Deleted and rule.Compatibility_Type != 'incompatible' and rule.Is_Compatible:
+                rule.Is_Deleted = True
+                rule.Is_Active = False
+                rule.Updated_By_id = actor_id
+                rule.Updated_Date = today
+                rule.save(update_fields=['Is_Deleted', 'Is_Active', 'Updated_By', 'Updated_Date'])
+
+        for product_id, product in selected.items():
+            rule = rules.get(product_id)
+            if rule and rule_type == 'compatible' and rule.Is_Compatible and rule.Compatibility_Type != 'incompatible':
+                if rule.Is_Active and not rule.Is_Deleted:
+                    continue
+                rule.Is_Active = True
+                rule.Is_Deleted = False
+                rule.Updated_By_id = actor_id
+                rule.Updated_Date = today
+                rule.save(update_fields=['Is_Active', 'Is_Deleted', 'Updated_By', 'Updated_Date'])
+                continue
+
+            fields = {
+                'Addon_Name': addon.Addon_Name, 'Product_Name': product.Product_Name,
+                'Compatibility_Type': rule_type, 'Is_Compatible': rule_type == 'compatible',
+                'Is_Active': True, 'Is_Deleted': False, 'Updated_By_id': actor_id, 'Updated_Date': today,
+            }
+            if rule:
+                for name, value in fields.items():
+                    setattr(rule, name, value)
+                rule.save(update_fields=fields.keys())
+            else:
+                AddonProductCompatibility.objects.create(
+                    Addon=addon, Product=product, Created_By_id=actor_id, **fields,
+                )
+
+        if rule_type == 'incompatible':
+            addon.Products.remove(*selected.keys())
+
     Started_Date = serializers.DateField(required=False, default=date.today)
     product_name = serializers.SerializerMethodField(read_only=True)
     product_code = serializers.SerializerMethodField(read_only=True)
@@ -25,6 +100,14 @@ class Addonserializer(serializers.ModelSerializer):
 
     def validate(self, attrs):
         attrs = super().validate(attrs)
+        if self.instance is not None and 'Product_Compatibility_Type' in attrs:
+            raise serializers.ValidationError({'Product_Compatibility_Type': 'Edit existing rules in Product Compatibility.'})
+        if 'Product_Compatibility_Type' in attrs:
+            request = self.context.get('request')
+            if request is None or not request.user.is_authenticated:
+                raise serializers.ValidationError({'Product_Compatibility_Type': 'Sign in before creating rules.'})
+        if any(product.Is_Deleted for product in attrs.get('Products', [])):
+            raise serializers.ValidationError({'Products': 'Select available products.'})
         if self.instance is not None and 'Trial_Available' not in attrs and 'Trial_Days' not in attrs:
             return attrs
 
@@ -2072,9 +2155,42 @@ class AddonCategorySerializers(serializers.ModelSerializer):
 
 
 class AddonProductCompatibilitySerializer(serializers.ModelSerializer):
+    Dependencies = serializers.ListField(child=serializers.IntegerField(min_value=1), required=False)
+
     class Meta:
         model = AddonProductCompatibility
         fields = '__all__'
+        read_only_fields = ('AddonProductCompatibility_Id', 'Addon_Name', 'Product_Name', 'Is_Deleted',
+                            'Created_By', 'Updated_By', 'Created_Date', 'Updated_Date')
+        validators = []
+
+    def validate(self, attrs):
+        def value(name, default=None):
+            return attrs.get(name, getattr(self.instance, name, default))
+
+        addon, product = value('Addon'), value('Product')
+        if addon is None or addon.Is_Deleted:
+            raise serializers.ValidationError({'Addon': 'Select an available add-on.'})
+        if product is None or product.Is_Deleted:
+            raise serializers.ValidationError({'Product': 'Select an available product.'})
+
+        dependencies = list(dict.fromkeys(value('Dependencies', [])))
+        if 'Dependencies' in attrs:
+            if addon.pk in dependencies or AddonMaster.objects.filter(pk__in=dependencies, Is_Deleted=False).count() != len(dependencies):
+                raise serializers.ValidationError({'Dependencies': 'Select other available add-ons.'})
+            attrs['Dependencies'] = dependencies
+
+        if attrs.get('Compatibility_Type'):
+            attrs['Is_Compatible'] = attrs['Compatibility_Type'] != 'incompatible'
+        elif 'Is_Compatible' in attrs:
+            attrs['Compatibility_Type'] = 'compatible' if attrs['Is_Compatible'] else 'incompatible'
+        if value('Compatibility_Type') == 'dependency' and not dependencies:
+            raise serializers.ValidationError({'Dependencies': 'Select at least one required add-on.'})
+        if value('Version_Constraint') and not (value('Minimum_Version') or value('Maximum_Version')):
+            raise serializers.ValidationError({'Version_Constraint': 'Enter a minimum or maximum version.'})
+        attrs.update(Addon_Name=addon.Addon_Name, Product_Name=product.Product_Name)
+        return attrs
+
 
 class AddonProductCompatibilitySerializers(serializers.ModelSerializer):
 
