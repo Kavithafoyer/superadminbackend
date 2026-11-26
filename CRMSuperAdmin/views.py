@@ -1842,6 +1842,10 @@ class AddonAdditional(ListAPIView):
                 filterdata["Tax__iexact"] = data['Tax']
             if data.get('Category'):
                 filterdata["Category__iexact"] = data['Category']
+            if data.get('Addon_Category'):
+                filterdata["Addon_Category_id"] = data['Addon_Category']
+            if data.get('Status'):
+                filterdata["Status__iexact"] = data['Status']
             if data.get('Billing_Cycle'):
                 filterdata["Billing_Cycle__iexact"] = data['Billing_Cycle']
             if data.get('Is_Active') is not None:
