@@ -699,9 +699,9 @@ class ProductCategory(models.Model):
     Is_Active = models.BooleanField(default=True, blank=True, null=True)
     Is_Deleted = models.BooleanField(default=False, blank=True, null=True)
     Created_By = models.ForeignKey(UserAdmin, on_delete=models.CASCADE, related_name='created_product_category_set', blank=True, null=True)
-    Created_Date = models.DateTimeField(default=date.today, blank=True, null=True)
+    Created_Date = models.DateTimeField(default=timezone.now, blank=True, null=True)
     Updated_By = models.ForeignKey(UserAdmin, on_delete=models.CASCADE, related_name='updated_product_category_set', blank=True, null=True)
-    Updated_Date = models.DateTimeField(default=date.today, blank=True, null=True)
+    Updated_Date = models.DateTimeField(default=timezone.now, blank=True, null=True)
 
     class Meta:
         db_table = 'ProductCategory'
@@ -743,9 +743,9 @@ class ProductMaster(models.Model):
     Is_Active = models.BooleanField(default=True, blank=True, null=True)
     Is_Deleted = models.BooleanField(default=False, blank=True, null=True)
     Created_By = models.ForeignKey(UserAdmin, on_delete=models.CASCADE, related_name='created_product_master_set', blank=True, null=True)
-    Created_Date = models.DateTimeField(default=date.today, blank=True, null=True)
+    Created_Date = models.DateTimeField(default=timezone.now, blank=True, null=True)
     Updated_By = models.ForeignKey(UserAdmin, on_delete=models.CASCADE, related_name='updated_product_master_set', blank=True, null=True)
-    Updated_Date = models.DateTimeField(default=date.today, blank=True, null=True)
+    Updated_Date = models.DateTimeField(default=timezone.now, blank=True, null=True)
 
     @property
     def Product_Id(self):

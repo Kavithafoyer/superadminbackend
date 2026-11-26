@@ -423,6 +423,8 @@ path('CreatePegattoSubdomainAPIView/',CreatePegattoSubdomainAPIView.as_view()),
 path('ProductMasterCRUD/', ProductMasterCRUD.as_view()),
 path('ProductMasterList/', ProductMasterListAPI.as_view()),
 path('ProductMasterLookups/', ProductMasterLookupsAPIView.as_view()),
+path('ProductMasterFilter/', ProductMasterFilterAPI.as_view()),
+path('ProductMasterExport/', ProductMasterExportAPI.as_view()),
 
 # Document Master
 path('DocumentMasterCRUD/', DocumentMasterCRUD.as_view()),
