@@ -253,11 +253,8 @@ WSGI_APPLICATION = 'CRM.wsgi.application'
 # DATABASES = {
 # 'default': {
 #         "ENGINE":"django.db.backends.postgresql_psycopg2",
-#         "NAME":"pegattosuperadmin",
 #         "NAME":"SUPERADMIN_DB",
 #         "USER":"postgres",
-#         "PASSWORD":"123",
-#         "PASSWORD":"123",
 #         "PASSWORD":"Foyer@123",
 #         "HOST":"localhost",
 #         "PORT":"5432"
