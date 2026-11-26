@@ -499,6 +499,7 @@ path('AddonTieredPricingKPI/',AddonTieredPricingKPIAPI.as_view()),
 path('AddonTieredPricingExport/',AddonTieredPricingExportAPI.as_view()),
 
 
+path('AddonDiscountCouponOptions/', AddonDiscountCouponOptions.as_view()),
 path('AddonDiscountCouponCRUD/',AddonDiscountCouponCRUD.as_view()),
 path('AddonDiscountCouponListwithPagination/',AddonDiscountCouponListwithPagination.as_view()),
 path('AddonDiscountCouponlistwithoutpaginaton/',AddonDiscountCouponlistwithoutpaginaton.as_view()),

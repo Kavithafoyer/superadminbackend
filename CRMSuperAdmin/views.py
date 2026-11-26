@@ -64,7 +64,7 @@ from rest_framework.generics import ListAPIView
 from rest_framework.decorators import api_view
 from rest_framework import status
 from rest_framework.renderers import JSONRenderer, BaseRenderer
-from rest_framework.permissions import DjangoModelPermissions, IsAuthenticated
+from rest_framework.permissions import DjangoModelPermissions, IsAuthenticated, IsAuthenticatedOrReadOnly
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 
 # from rest_framework_jwt.authentication import JWTAuthentication
@@ -13821,13 +13821,14 @@ class AddonProductCompatibilityFilter(AddonProductCompatibilityListwithPaginatio
 
 
 class AddonPriceTemplateCRUD(APIView):
+    permission_classes = [IsAuthenticatedOrReadOnly]
     def post(self,request,*args,**kwargs):
         try:
             data = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
-            user = request.user if getattr(request, 'user', None) and request.user.is_authenticated else UserAdmin.objects.first()
-            if not data.get('Created_By') and user:
+            user = request.user
+            if user.is_authenticated:
                 data['Created_By'] = user.id
-            if not data.get('Updated_By') and user:
+            if user.is_authenticated:
                 data['Updated_By'] = user.id
 
             serialize = AddonPriceTemplateSerializer(data=data)
@@ -13873,8 +13874,8 @@ class AddonPriceTemplateCRUD(APIView):
             else:
                 module = AddonPriceTemplate.objects.get(AddonPriceTemplate_Id=record_id)
                 
-            user = request.user if getattr(request, 'user', None) and request.user.is_authenticated else UserAdmin.objects.first()
-            if not data.get('Updated_By') and user:
+            user = request.user
+            if user.is_authenticated:
                 data['Updated_By'] = user.id
 
             serialize = AddonPriceTemplateSerializer(instance=module, data=data, partial=True)
@@ -13892,14 +13893,17 @@ class AddonPriceTemplateCRUD(APIView):
     def patch(self,request,*args,**kwargs):
         return self.put(request, *args, **kwargs)
 
+    @transaction.atomic
     def delete(self,request,*args,**kwargs):
         try:
             data = request.query_params
             record_id = data.get('id') or (request.data.get('id') if isinstance(request.data, dict) else None)
             if str(record_id).isdigit():
-                module = AddonPriceTemplate.objects.get(id=record_id)
+                module = AddonPriceTemplate.objects.select_for_update().get(id=record_id)
             else:
-                module = AddonPriceTemplate.objects.get(AddonPriceTemplate_Id=record_id)
+                module = AddonPriceTemplate.objects.select_for_update().get(AddonPriceTemplate_Id=record_id)
+            if module.AddonPrices.filter(Is_Deleted=False).exists():
+                return Response({'Error': 'Remove pricing rules that use this template first.'}, status=409)
             module.Is_Deleted = True
             module.save()
             return HttpResponse(JSONRenderer().render({"message": "Price Template deleted successfully", "id": record_id}), content_type="application/json", status=status.HTTP_200_OK)
@@ -13955,7 +13959,9 @@ class AddonPriceTemplateSearch(ListAPIView):
 class AddonPriceTemplatelistwithoutpaginaton(APIView):
     def get(self,request,*args,**kwargs):
         module = AddonPriceTemplate.objects.filter(Is_Deleted=False).order_by('-id')
-        serialize = AddonPriceTemplateSerializer(module,many=True)
+        serialize = AddonPriceTemplateSerializer(
+            module, many=True, context={'exclude_tiers': request.query_params.get('include_tiers') == 'false'}
+        )
         output = JSONRenderer().render(serialize.data)
         return HttpResponse(output, content_type='application/json', status=status.HTTP_200_OK)
 
@@ -14165,35 +14171,16 @@ class AddonPriceTemplateExportAPI(APIView):
 
 
 class AddonPricingCRUD(APIView):
-    authentication_classes = []
-    permission_classes = []
+    permission_classes = [IsAuthenticatedOrReadOnly]
 
     def post(self, request, *args, **kwargs):
         try:
             data = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
-            user = request.user if getattr(request, 'user', None) and request.user.is_authenticated else UserAdmin.objects.first()
-            if not data.get('Created_By') and user:
+            user = request.user
+            if user.is_authenticated:
                 data['Created_By'] = user.id
-            if not data.get('Updated_By') and user:
+            if user.is_authenticated:
                 data['Updated_By'] = user.id
-
-            if not data.get('Addon') and not data.get('Addon_id'):
-                addon_obj = AddonMaster.objects.filter(Is_Deleted=False).first()
-                if addon_obj:
-                    data['Addon'] = addon_obj.id
-            if not data.get('Price_Template') and not data.get('Price_Template_id'):
-                template_obj = AddonPriceTemplate.objects.filter(Is_Deleted=False).first()
-                if template_obj:
-                    data['Price_Template'] = template_obj.id
-
-            if not data.get('Addon_Name') and data.get('Addon'):
-                addon_match = AddonMaster.objects.filter(id=data['Addon']).first()
-                if addon_match:
-                    data['Addon_Name'] = addon_match.Addon_Name
-            if not data.get('Price_Template_Name') and data.get('Price_Template'):
-                template_match = AddonPriceTemplate.objects.filter(id=data['Price_Template']).first()
-                if template_match:
-                    data['Price_Template_Name'] = template_match.Template_Name
 
             serialize = AddonPricingSerializer(data=data)
             if serialize.is_valid():
@@ -14227,7 +14214,7 @@ class AddonPricingCRUD(APIView):
             module = AddonPricing.objects.filter(Q(id=record_id) | Q(AddonPricing_Id=record_id)).first()
             if not module:
                 return HttpResponse(JSONRenderer().render({"Error": "Record not found"}), content_type="application/json", status=status.HTTP_404_NOT_FOUND)
-            user = request.user if getattr(request, 'user', None) and request.user.is_authenticated else UserAdmin.objects.first()
+            user = request.user
             if user:
                 data['Updated_By'] = user.id
             serialize = AddonPricingSerializer(instance=module, data=data, partial=True)
@@ -14308,7 +14295,7 @@ class AddonPricinglistwithoutpaginaton(APIView):
     permission_classes = []
 
     def get(self, request, *args, **kwargs):
-        module = AddonPricing.objects.filter(Is_Deleted=False).order_by('-id')
+        module = AddonPricing.objects.filter(Is_Deleted=False).select_related('Addon', 'Price_Template').prefetch_related('Tiers').order_by('-id')
         serialize = AddonPricingSerializer(module, many=True)
         output = JSONRenderer().render(serialize.data)
         return HttpResponse(output, content_type='application/json', status=status.HTTP_200_OK)
@@ -14543,22 +14530,18 @@ class AddonPricingExportAPI(APIView):
 
 
 class AddonTieredPricingCRUD(APIView):
-    authentication_classes = []
-    permission_classes = []
+    permission_classes = [IsAuthenticatedOrReadOnly]
 
     def post(self, request, *args, **kwargs):
+        if 'Tiers' in request.data:
+            return self.save_schedule(request)
         try:
             data = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
-            user = request.user if getattr(request, 'user', None) and request.user.is_authenticated else UserAdmin.objects.first()
-            if not data.get('Created_By') and user:
+            user = request.user
+            if user.is_authenticated:
                 data['Created_By'] = user.id
-            if not data.get('Updated_By') and user:
+            if user.is_authenticated:
                 data['Updated_By'] = user.id
-            if not data.get('Addon_Pricing'):
-                pricing_obj = AddonPricing.objects.filter(Is_Deleted=False).first()
-                if pricing_obj:
-                    data['Addon_Pricing'] = pricing_obj.id
-
             serialize = AddonTieredPricingSerializer(data=data)
             if serialize.is_valid():
                 instance = serialize.save()
@@ -14566,6 +14549,32 @@ class AddonTieredPricingCRUD(APIView):
             return HttpResponse(JSONRenderer().render({"Error": serialize.errors}), content_type="application/json", status=status.HTTP_400_BAD_REQUEST)
         except Exception as e:
             return HttpResponse(JSONRenderer().render({"Error": str(e)}), content_type="application/json", status=status.HTTP_400_BAD_REQUEST)
+
+    @transaction.atomic
+    def save_schedule(self, request):
+        payload = serializers.Serializer(data=request.data)
+        payload.fields['Addon_Pricing'] = serializers.PrimaryKeyRelatedField(
+            queryset=AddonPricing.objects.filter(Is_Deleted=False, Addon__Is_Deleted=False)
+        )
+        payload.fields['Tiers'] = TemplateTierSerializer(many=True)
+        payload.fields['Is_Active'] = serializers.BooleanField(default=True)
+        payload.fields['Schedule'] = TierScheduleDetailsSerializer(required=False)
+        payload.is_valid(raise_exception=True)
+        tiers = validate_tier_ranges(payload.validated_data['Tiers'])
+        pricing = AddonPricing.objects.select_for_update().get(pk=payload.validated_data['Addon_Pricing'].pk)
+        if pricing.Is_Deleted:
+            return Response({'Addon_Pricing': 'Select a saved pricing rule.'}, status=400)
+        if str(request.data.get('Price_Template')) != str(pricing.Price_Template_id):
+            return Response({'Price_Template': 'The assigned template changed. Reload the pricing rule.'}, status=409)
+
+        details = payload.validated_data.get('Schedule')
+        pricing.Tier_Schedule = {**(pricing.Tier_Schedule or {}), **(details or {}), 'Customized': True}
+        pricing.save(update_fields=['Tier_Schedule'])
+
+        replace_pricing_tiers(pricing, tiers, payload.validated_data['Is_Active'], request.user)
+        return Response(AddonTieredPricingSerializer(
+            pricing.Tiers.filter(Is_Deleted=False).order_by('Min_Employees'), many=True
+        ).data)
 
     def get(self, request, *args, **kwargs):
         try:
@@ -14767,71 +14776,63 @@ class AddonTieredPricingExportAPI(APIView):
 
 
 class AddonDiscountCouponCRUD(APIView):
-    authentication_classes = []
-    permission_classes = []
+    permission_classes = [IsAuthenticated]
 
-    def post(self, request, *args, **kwargs):
-        try:
-            data = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
-            user = request.user if getattr(request, 'user', None) and request.user.is_authenticated else UserAdmin.objects.first()
-            if not data.get('Created_By') and user:
-                data['Created_By'] = user.id
-            if not data.get('Updated_By') and user:
-                data['Updated_By'] = user.id
-            if not data.get('Valid_From'):
-                data['Valid_From'] = date.today().strftime('%Y-%m-%d')
-            if not data.get('Valid_To'):
-                data['Valid_To'] = (date.today() + timedelta(days=90)).strftime('%Y-%m-%d')
+    def get_record(self, key):
+        filters = Q(AddonDiscountCoupon_Id=key) | Q(Coupon_Code=key)
+        if str(key).isdigit():
+            filters |= Q(pk=key)
+        return AddonDiscountCoupon.objects.filter(Is_Deleted=False).filter(filters).first()
 
-            serialize = AddonDiscountCouponSerializer(data=data)
-            if serialize.is_valid():
-                instance = serialize.save()
-                return HttpResponse(JSONRenderer().render(AddonDiscountCouponSerializer(instance).data), content_type="application/json", status=status.HTTP_200_OK)
-            return HttpResponse(JSONRenderer().render({"Error": serialize.errors}), content_type="application/json", status=status.HTTP_400_BAD_REQUEST)
-        except Exception as e:
-            return HttpResponse(JSONRenderer().render({"Error": str(e)}), content_type="application/json", status=status.HTTP_400_BAD_REQUEST)
+    def get(self, request,*args,**kwargs):
+        params = request.query_params
+        record = self.get_record(params.get('id') or params.get('AddonDiscountCoupon_Id') or params.get('Coupon_Code'))
+        if record is None:
+            return Response({'detail': 'Offer not found.'}, status=404)
+        return Response(AddonDiscountCouponSerializer(record).data)
 
-    def get(self, request, *args, **kwargs):
-        try:
-            data = request.query_params
-            record_id = data.get('id') or data.get('AddonDiscountCoupon_Id') or data.get('Coupon_Code')
-            module = AddonDiscountCoupon.objects.filter(Is_Deleted=False).filter(Q(id=record_id) | Q(AddonDiscountCoupon_Id=record_id) | Q(Coupon_Code=record_id)).first()
-            if not module:
-                return HttpResponse(JSONRenderer().render({"Error": "Coupon not found"}), content_type="application/json", status=status.HTTP_404_NOT_FOUND)
-            return HttpResponse(JSONRenderer().render(AddonDiscountCouponSerializer(module).data), content_type="application/json", status=status.HTTP_200_OK)
-        except Exception as e:
-            return HttpResponse(JSONRenderer().render({"Error": str(e)}), content_type="application/json", status=status.HTTP_400_BAD_REQUEST)
+    @transaction.atomic
+    def post(self, request,*args,**kwargs):
+        serializer = AddonDiscountCouponSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        serializer.save(Created_By=request.user, Updated_By=request.user, Created_Date=timezone.now(), Updated_Date=timezone.now())
+        return Response(serializer.data)
 
-    def put(self, request, *args, **kwargs):
-        try:
-            data = request.data
-            record_id = data.get('id') or data.get('AddonDiscountCoupon_Id') or data.get('Coupon_Code')
-            module = AddonDiscountCoupon.objects.filter(Is_Deleted=False).filter(Q(id=record_id) | Q(AddonDiscountCoupon_Id=record_id) | Q(Coupon_Code=record_id)).first()
-            if not module:
-                return HttpResponse(JSONRenderer().render({"Error": "Coupon not found"}), content_type="application/json", status=status.HTTP_404_NOT_FOUND)
-            serialize = AddonDiscountCouponSerializer(instance=module, data=data, partial=True)
-            if serialize.is_valid():
-                instance = serialize.save()
-                return HttpResponse(JSONRenderer().render(AddonDiscountCouponSerializer(instance).data), content_type="application/json", status=status.HTTP_200_OK)
-            return HttpResponse(JSONRenderer().render({"Error": serialize.errors}), content_type="application/json", status=status.HTTP_400_BAD_REQUEST)
-        except Exception as e:
-            return HttpResponse(JSONRenderer().render({"Error": str(e)}), content_type="application/json", status=status.HTTP_400_BAD_REQUEST)
+    @transaction.atomic
+    def put(self, request,*args,**kwargs):
+        data = request.data
+        record = self.get_record(data.get('id') or data.get('AddonDiscountCoupon_Id') or data.get('Coupon_Code'))
+        if record is None:
+            return Response({'detail': 'Offer not found.'}, status=404)
+        serializer = AddonDiscountCouponSerializer(record, data=data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save(Updated_By=request.user, Updated_Date=timezone.now())
+        return Response(serializer.data)
 
-    def patch(self, request, *args, **kwargs):
-        return self.put(request, *args, **kwargs)
+    patch = put
 
-    def delete(self, request, *args, **kwargs):
-        try:
-            data = request.query_params if request.query_params else request.data
-            record_id = data.get('id') or data.get('AddonDiscountCoupon_Id') or data.get('Coupon_Code')
-            module = AddonDiscountCoupon.objects.filter(Q(id=record_id) | Q(AddonDiscountCoupon_Id=record_id) | Q(Coupon_Code=record_id)).first()
-            if module:
-                module.Is_Deleted = True
-                module.save()
-                return HttpResponse(JSONRenderer().render({"message": "Successfully deleted", "id": record_id}), content_type="application/json", status=status.HTTP_200_OK)
-            return HttpResponse(JSONRenderer().render({"Error": "Not found"}), content_type="application/json", status=status.HTTP_404_NOT_FOUND)
-        except Exception as e:
-            return HttpResponse(JSONRenderer().render({"Error": str(e)}), content_type="application/json", status=status.HTTP_400_BAD_REQUEST)
+    def delete(self, request,*args,**kwargs):
+        data = request.query_params or request.data
+        record = self.get_record(data.get('id') or data.get('AddonDiscountCoupon_Id') or data.get('Coupon_Code'))
+        if record is None:
+            return Response({'detail': 'Offer not found.'}, status=404)
+        record.Is_Deleted = True
+        record.save(update_fields=['Is_Deleted'])
+        return Response({'id': record.pk})
+
+
+class AddonDiscountCouponOptions(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request,*args,**kwargs):
+        return Response({
+            'products': list(ProductMaster.objects.filter(Is_Deleted=False).order_by('Product_Name').values('id', 'Product_Name')),
+            'addons': [
+                {'id': addon.pk, 'Addon_Name': addon.Addon_Name, 'Products': [product.pk for product in addon.Products.all()]}
+                for addon in AddonMaster.objects.filter(Is_Deleted=False).prefetch_related('Products').order_by('Addon_Name')
+            ],
+            'plans': list(Plan.objects.filter(Is_Deleted=False, Is_Archived=False).order_by('Plan_Name').values('id', 'Plan_Name', 'Plan_Id', 'Product_id')),
+        })
 
 
 class AddonDiscountCouponListwithPagination(ListAPIView):
@@ -14928,30 +14929,19 @@ class AddonDiscountCouponFilter(APIView):
 
 
 class AddonDiscountCouponKPIAPI(APIView):
-    authentication_classes = []
-    permission_classes = []
+    permission_classes = [IsAuthenticated]
 
-    def get(self, request, *args, **kwargs):
-        try:
-            total_coupons = AddonDiscountCoupon.objects.filter(Is_Deleted=False).count()
-            active_coupons = AddonDiscountCoupon.objects.filter(Is_Deleted=False, Is_Active=True).count()
-            inactive_coupons = AddonDiscountCoupon.objects.filter(Is_Deleted=False, Is_Active=False).count()
-            
-            qs = AddonDiscountCoupon.objects.filter(Is_Deleted=False)
-            perc_discounts = [float(c.Discount_Value) for c in qs if c.Discount_Type == 'Percentage' and c.Discount_Value]
-            avg_disc = f"{round(sum(perc_discounts) / len(perc_discounts))}%" if perc_discounts else "22%"
-
-            data = {
-                "active_discounts": active_coupons or 8,
-                "total_redeemed": 1420,
-                "total_coupons": total_coupons or 8,
-                "active_coupons": active_coupons or 7,
-                "inactive_coupons": inactive_coupons or 1,
-                "avg_discount": avg_disc,
-            }
-            return HttpResponse(JSONRenderer().render(data), content_type="application/json", status=status.HTTP_200_OK)
-        except Exception as e:
-            return HttpResponse(JSONRenderer().render({"Error": str(e)}), content_type="application/json", status=status.HTTP_400_BAD_REQUEST)
+    def get(self, request,*args,**kwargs):
+        now = timezone.now()
+        offers = AddonDiscountCoupon.objects.filter(Is_Deleted=False)
+        active = offers.filter(Is_Active=True, Valid_From__lte=now, Valid_To__gte=now)
+        return Response({
+            'active_discounts': active.filter(Kind='Discount').count(),
+            'active_coupons': active.filter(Kind='Coupon').count(),
+            'total_coupons': offers.filter(Kind='Coupon').count(),
+            'total_redeemed': None,
+            'total_discount_value': None,
+        })
 
 
 class AddonDiscountCouponExportAPI(APIView):
@@ -15137,8 +15127,15 @@ class AddonPriceHistoryListwithPagination(ListAPIView):
     queryset = AddonPriceHistory.objects.filter(Is_Deleted=False).order_by('-Change_Date', '-id')
     serializer_class = AddonPriceHistorySerializer
 
+    def get_serializer_class(self):
+        if self.request.query_params.get('view') == 'templates':
+            return AddonPriceTemplateSerializer
+        return super().get_serializer_class()
+
     def get_queryset(self):
-        return AddonPriceHistory.objects.filter(Is_Deleted=False).order_by('-Change_Date', '-id')
+        if self.request.query_params.get('view') == 'templates':
+            return AddonPriceTemplate.objects.filter(Is_Deleted=False).order_by('-id')
+        return super().get_queryset()
 
 
 class AddonPriceHistorylistwithoutpaginaton(APIView):

@@ -1,4 +1,6 @@
 import json
+from uuid import uuid4
+from decimal import Decimal, ROUND_HALF_UP
 import time
 from pyexpat import model
 from rest_framework import serializers
@@ -2201,7 +2203,54 @@ class AddonProductCompatibilitySerializers(serializers.ModelSerializer):
 
 
 
+class TemplateTierSerializer(serializers.Serializer):
+    Name = serializers.CharField(max_length=100)
+    Min_Employees = serializers.IntegerField(min_value=0, max_value=2147483647)
+    Max_Employees = serializers.IntegerField(min_value=0, max_value=2147483647)
+    Tier_Price = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=Decimal('0'))
+
+    Storage = serializers.CharField(max_length=100, allow_blank=True, required=False)
+    Features = serializers.CharField(max_length=500, allow_blank=True, required=False)
+    Unit_Price = serializers.DecimalField(max_digits=14, decimal_places=4, min_value=Decimal('0'), required=False, allow_null=True)
+    Discount = serializers.DecimalField(max_digits=5, decimal_places=2, min_value=Decimal('0'), max_value=Decimal('100'), required=False, allow_null=True)
+
+    def validate(self, attrs):
+        if attrs['Min_Employees'] > attrs['Max_Employees']:
+            raise serializers.ValidationError('Maximum employees must be at least the minimum.')
+        return attrs
+
+
+def validate_tier_ranges(tiers):
+    ordered = sorted(tiers, key=lambda tier: tier['Min_Employees'])
+    if any(left['Max_Employees'] >= right['Min_Employees'] for left, right in zip(ordered, ordered[1:])):
+        raise serializers.ValidationError('Employee ranges must not overlap.')
+    return ordered
+
+
 class AddonPriceTemplateSerializer(serializers.ModelSerializer):
+    Tiers = TemplateTierSerializer(many=True, required=False)
+    Discount_Percentage = serializers.DecimalField(
+        max_digits=5, decimal_places=2, min_value=Decimal('0'),
+        max_value=Decimal('100'), required=False, allow_null=True,
+    )
+    Applied_Addons = serializers.SerializerMethodField()
+
+    def get_fields(self):
+        fields = super().get_fields()
+        if self.context.get('exclude_tiers'):
+            fields.pop('Tiers')
+        return fields
+
+    def get_Applied_Addons(self, instance):
+        return list(instance.AddonPrices.filter(Is_Deleted=False, Addon__Is_Deleted=False)
+                    .order_by('Addon_id').values_list('Addon_id', flat=True).distinct())
+
+    def validate_Tiers(self, tiers):
+        return [
+            {key: str(value) if isinstance(value, Decimal) else value for key, value in tier.items()}
+            for tier in validate_tier_ranges(tiers)
+        ]
+
     class Meta:
         model = AddonPriceTemplate
         fields = '__all__'
@@ -2215,21 +2264,160 @@ class AddonPriceTemplateSerializers(serializers.ModelSerializer):
 
 
 
+class EditionRateSerializer(serializers.Serializer):
+    Plan = serializers.IntegerField(min_value=1)
+    Rate = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=Decimal('0'))
+    Trial_Days = serializers.IntegerField(min_value=0, max_value=2147483647)
+    Active = serializers.BooleanField()
+
+
+class PricingOptionsSerializer(serializers.Serializer):
+    Billing_Cycle = serializers.ChoiceField(choices=['Monthly', 'Annual'], required=False)
+    Allow_Annual_Billing = serializers.BooleanField(required=False)
+    Require_Approval = serializers.BooleanField(required=False)
+    Model = serializers.ChoiceField(choices=['Fixed', 'Per Tenant', 'Per User', 'Per Usage', 'Tiered'], required=False)
+    Marketplace_Visible = serializers.BooleanField(required=False)
+    Allow_Trial = serializers.BooleanField(required=False)
+    Annual_Discount = serializers.DecimalField(max_digits=5, decimal_places=2, min_value=Decimal('0'), max_value=Decimal('100'), allow_null=True, required=False)
+    Edition_Rates = EditionRateSerializer(many=True, required=False)
+
+
+class TierScheduleDetailsSerializer(serializers.Serializer):
+    Code = serializers.CharField(max_length=50)
+    Name = serializers.CharField(max_length=150)
+    Billing_Cycle = serializers.ChoiceField(choices=['Monthly', 'Annual'])
+    Method = serializers.ChoiceField(choices=['Volume Based', 'Graduated (Tiered)'])
+    Usage_Metric = serializers.CharField(max_length=80)
+
+
+def replace_pricing_tiers(pricing, tiers, active, user):
+    # Caller holds the pricing row lock for the duration of the transaction.
+    existing = list(pricing.Tiers.filter(Is_Deleted=False).order_by('Min_Employees', 'pk'))
+    for index, tier in enumerate(tiers):
+        fields = {
+            'Name': tier['Name'],
+            'Rate_Details': {
+                key: str(tier[key]) if tier[key] is not None else None
+                for key in ('Storage', 'Features', 'Unit_Price', 'Discount') if key in tier
+            },
+            'Min_Employees': tier['Min_Employees'],
+            'Max_Employees': tier['Max_Employees'],
+            'Tier_Price': tier['Tier_Price'],
+            'Is_Active': active,
+            'Updated_By': user,
+            'Updated_Date': timezone.now(),
+        }
+        if index < len(existing):
+            pricing.Tiers.filter(pk=existing[index].pk).update(**fields)
+        else:
+            pricing.Tiers.create(Created_By=user, Created_Date=timezone.now(), **fields)
+    pricing.Tiers.filter(pk__in=[tier.pk for tier in existing[len(tiers):]]).update(Is_Deleted=True)
+
+
 class AddonPricingSerializer(serializers.ModelSerializer):
+    Pricing_Options = PricingOptionsSerializer(required=False)
+    Tier_Schedule = serializers.JSONField(read_only=True)
+    Tiers = TemplateTierSerializer(many=True, required=False, write_only=True)
+
+    def validate_Tiers(self, tiers):
+        return validate_tier_ranges(tiers)
+
+    def validate_Pricing_Options(self, value):
+        return PricingOptionsSerializer(value).data
+
+    Base_Price = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=Decimal('0'))
+
+    def validate(self, attrs):
+        addon = attrs.get('Addon', getattr(self.instance, 'Addon', None))
+        template = attrs.get('Price_Template', getattr(self.instance, 'Price_Template', None))
+        rates = attrs.get('Pricing_Options', {}).get('Edition_Rates', [])
+        plans = [row['Plan'] for row in rates]
+        if plans and (not addon or len(set(plans)) != len(plans) or set(plans) - set(addon.Plans.values_list('pk', flat=True))):
+            raise serializers.ValidationError({'Pricing_Options': 'Edition rates must reference distinct plans linked to the add-on.'})
+        if addon and addon.Is_Deleted:
+            raise serializers.ValidationError({'Addon': 'Select an available add-on.'})
+        if template and template.Is_Deleted and (self.instance is None or self.instance.Price_Template_id != template.pk):
+            raise serializers.ValidationError({'Price_Template': 'Select an available template.'})
+        start = attrs.get('Effective_From', getattr(self.instance, 'Effective_From', None))
+        end = attrs.get('Effective_To', getattr(self.instance, 'Effective_To', None))
+        if start and end and start > end:
+            raise serializers.ValidationError({'Effective_To': 'End date cannot precede the start date.'})
+        return attrs
+
+    @transaction.atomic
+    def save(self, **kwargs):
+        addon = self.validated_data.get('Addon', getattr(self.instance, 'Addon', None))
+        template = self.validated_data.get('Price_Template', getattr(self.instance, 'Price_Template', None))
+        template = AddonPriceTemplate.objects.select_for_update().get(pk=template.pk)
+        if template.Is_Deleted and (self.instance is None or self.instance.Price_Template_id != template.pk):
+            raise serializers.ValidationError({'Price_Template': 'Select an available template.'})
+        addon = AddonMaster.objects.select_for_update().get(pk=addon.pk)
+        if addon.Is_Deleted:
+            raise serializers.ValidationError({'Addon': 'Select an available add-on.'})
+        base_price = self.validated_data.get('Base_Price')
+        update_master = base_price is not None and (
+            self.instance is None
+            or base_price != self.instance.Base_Price
+            or addon.pk != self.instance.Addon_id
+            or template.Currency != self.instance.Price_Template.Currency
+        )
+        tiers = self.validated_data.pop('Tiers', None)
+        if self.instance is not None:
+            self.instance = AddonPricing.objects.select_for_update().get(pk=self.instance.pk)
+        record = super().save(
+            Addon=addon, Addon_Name=addon.Addon_Name,
+            Price_Template=template, Price_Template_Name=template.Template_Name, **kwargs,
+        )
+        if update_master:
+            tax_rate = Decimal(str(addon.TaxPercentage or 0))
+            tax = (record.Base_Price * tax_rate / 100).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+            addon.Price = record.Base_Price
+            addon.Currency_code = template.Currency.partition(' ')[0] or addon.Currency_code
+            addon.TaxAmount = tax
+            addon.TotalAmount = record.Base_Price + tax
+            addon.Updated_By = record.Updated_By
+            addon.Updated_Date = timezone.now()
+            addon.save(update_fields=['Price', 'Currency_code', 'TaxAmount', 'TotalAmount', 'Updated_By', 'Updated_Date'])
+        if tiers is not None:
+            current_tiers = record.Tiers.filter(Is_Deleted=False)
+            active = current_tiers.filter(Is_Active=True).exists() if current_tiers.exists() else record.Is_Active
+            replace_pricing_tiers(record, tiers, active, record.Updated_By)
+            record.Tier_Schedule = {**(record.Tier_Schedule or {}), 'Customized': True}
+            record.save(update_fields=['Tier_Schedule'])
+        return record
+
     class Meta:
         model = AddonPricing
         fields = '__all__'
 
     def to_representation(self, instance):
         ret = super().to_representation(instance)
+        tiers = sorted(
+            (tier for tier in instance.Tiers.all() if tier.Is_Deleted is False),
+            key=lambda tier: (tier.Min_Employees, tier.pk),
+        )
+        ret['Tiers'] = [
+            {
+                **TemplateTierSerializer({
+                    **(tier.Rate_Details or {}),
+                    'Name': tier.Name,
+                    'Min_Employees': tier.Min_Employees,
+                    'Max_Employees': tier.Max_Employees,
+                    'Tier_Price': tier.Tier_Price,
+                }).data,
+                'id': tier.pk,
+                'Is_Active': tier.Is_Active,
+            }
+            for tier in tiers
+        ]
         try:
             if instance.Addon:
                 ret['Category'] = getattr(instance.Addon, 'Category', '') or ''
-                ret['Addon_Code'] = getattr(instance.Addon, 'AddonMaster_Id', '') or ''
+                ret['Addon_Code'] = instance.Addon.Addon_Code or instance.Addon.AddonMaster_Id
                 ret['License_Model'] = getattr(instance.Addon, 'License_Model', '') or 'Per Tenant'
             if instance.Price_Template:
-                ret['Pricing_Model'] = getattr(instance.Price_Template, 'Billing_Type', '') or 'Per Tenant'
-                ret['Billing_Cycle'] = getattr(instance.Price_Template, 'Billing_Cycle', '') or 'Monthly'
+                ret['Pricing_Model'] = (instance.Pricing_Options or {}).get('Model') or instance.Addon.License_Model or ''
+                ret['Billing_Cycle'] = (instance.Pricing_Options or {}).get('Billing_Cycle') or instance.Price_Template.Billing_Cycle
                 ret['Currency'] = getattr(instance.Price_Template, 'Currency', '') or 'INR'
                 ret['Template_Code'] = getattr(instance.Price_Template, 'Template_Code', '') or ''
                 ret['Price_Template_Name'] = getattr(instance.Price_Template, 'Template_Name', '') or ret.get('Price_Template_Name') or ''
@@ -2279,9 +2467,78 @@ class AddonTieredPricingSerializers(serializers.ModelSerializer):
 
 
 class AddonDiscountCouponSerializer(serializers.ModelSerializer):
+    Coupon_Code = serializers.CharField(max_length=50, required=False)
+    Status = serializers.SerializerMethodField()
+
     class Meta:
         model = AddonDiscountCoupon
         fields = '__all__'
+        read_only_fields = ('AddonDiscountCoupon_Id', 'Created_By', 'Updated_By', 'Created_Date', 'Updated_Date', 'Is_Deleted')
+
+    def validate(self, attrs):
+        def field(name, default=None):
+            return attrs.get(name, getattr(self.instance, name, default))
+
+        errors = {}
+        kind = field('Kind', 'Coupon')
+        if kind == 'Discount' and not field('Name'):
+            errors['Name'] = 'Enter a discount name.'
+        if self.instance and kind != self.instance.Kind:
+            errors['Kind'] = 'The offer type cannot be changed.'
+        if kind == 'Coupon':
+            code = field('Coupon_Code')
+            if 'Coupon_Code' in attrs:
+                attrs['Coupon_Code'] = code.upper()
+            if not code:
+                errors['Coupon_Code'] = 'Enter a coupon code.'
+            elif AddonDiscountCoupon.objects.filter(Coupon_Code__iexact=code).exclude(pk=getattr(self.instance, 'pk', None)).exists():
+                errors['Coupon_Code'] = 'This coupon code already exists.'
+        if kind == 'Discount':
+            attrs.pop('Coupon_Code', None)
+        value = field('Discount_Value')
+        discount_type = field('Discount_Type')
+        if discount_type not in ('Percentage', 'Flat Amount') and ('Discount_Type' in attrs or not self.instance):
+            errors['Discount_Type'] = 'Choose Percentage or Flat Amount.'
+        if value is not None and (value <= 0 or (discount_type == 'Percentage' and value > 100)):
+            errors['Discount_Value'] = 'Enter a positive value. A percentage cannot exceed 100.'
+        start, end = field('Valid_From'), field('Valid_To')
+        if start and end and start > end:
+            errors['Valid_To'] = 'Validity end must be on or after the start.'
+        for key in ('Usage_Limit', 'Per_Customer_Limit'):
+            if field(key) is not None and field(key) < 1:
+                errors[key] = 'Enter a limit greater than zero.'
+        applicability = field('Applicability', 'Add-on')
+        if applicability == 'Subscription' and attrs.get('Applicable_Addons'):
+            errors['Applicable_Addons'] = 'Select add-ons only for Add-on or All.'
+        if applicability == 'Add-on' and attrs.get('Applicable_Products'):
+            errors['Applicable_Products'] = 'Select products only for Subscription or All.'
+        for key in ('Applicable_Products', 'Applicable_Addons', 'Applicable_Plans'):
+            if any(item.Is_Deleted for item in attrs.get(key, [])):
+                errors[key] = 'Select records that are available.'
+        products = {item.pk for item in field('Applicable_Products', [])} if 'Applicable_Products' in attrs else (
+            set(self.instance.Applicable_Products.values_list('pk', flat=True)) if self.instance else set()
+        )
+        if products and any(plan.Product_id not in products for plan in attrs.get('Applicable_Plans', [])):
+            errors['Applicable_Plans'] = 'Select plans from the chosen products.'
+        if errors:
+            raise serializers.ValidationError(errors)
+        return attrs
+
+    def create(self, validated_data):
+        if validated_data.get('Kind') == 'Discount':
+            validated_data['Coupon_Code'] = f'DIS-{uuid4().hex}'
+        validated_data['AddonDiscountCoupon_Id'] = f'ADC{uuid4().int:039d}'
+        return super().create(validated_data)
+
+    def get_Status(self, instance):
+        now = timezone.now()
+        if not instance.Is_Active:
+            return 'Draft'
+        if instance.Valid_From > now:
+            return 'Scheduled'
+        if instance.Valid_To < now:
+            return 'Expired'
+        return 'Active'
 
     def to_representation(self, instance):
         ret = super().to_representation(instance)

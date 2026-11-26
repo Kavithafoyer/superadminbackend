@@ -544,6 +544,11 @@ class AddonPriceTemplate(models.Model):
     AddonPriceTemplate_Id = models.CharField(max_length=50,unique=True,default=AddonPriceTemplate_I)   
     Template_Code = models.CharField(max_length=50, unique=True)
     Template_Name = models.CharField(max_length=150)
+    Description = models.TextField(blank=True, default='')
+    Tiers = models.JSONField(default=list, blank=True)
+    Discount_Percentage = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
+    Show_For_New_Addons = models.BooleanField(default=False)
+    Allow_Customization = models.BooleanField(default=False)
     Billing_Type = models.CharField(max_length=100,blank=True,null=True)
     Billing_Cycle = models.CharField(max_length=100,blank=True,null=True)
     Currency = models.CharField(max_length=10, default='INR')
@@ -568,6 +573,8 @@ class AddonPricing(models.Model):
     Price_Template = models.ForeignKey('AddonPriceTemplate', on_delete=models.CASCADE, related_name='AddonPrices')
     Addon_Name = models.CharField(max_length=250, blank=True, null=True)
     Price_Template_Name = models.CharField(max_length=250, blank=True, null=True)
+    Pricing_Options = models.JSONField(default=dict, blank=True)
+    Tier_Schedule = models.JSONField(default=dict, blank=True)
     Base_Price = models.DecimalField(max_digits=12, decimal_places=2)
     Effective_From = models.DateField(default=date.today, blank=True, null=True)
     Effective_To = models.DateField(blank=True, null=True)
@@ -587,6 +594,8 @@ class AddonPricing(models.Model):
 class AddonTieredPricing(models.Model):
     AddonTieredPricing_Id = models.CharField(max_length=50,unique=True,default=AddonTieredPricing_I)   
     Addon_Pricing = models.ForeignKey('AddonPricing', on_delete=models.CASCADE, related_name='Tiers')
+    Name = models.CharField(max_length=100, blank=True, default='')
+    Rate_Details = models.JSONField(default=dict, blank=True)
     Min_Employees = models.PositiveIntegerField()
     Max_Employees = models.PositiveIntegerField()
     Tier_Price = models.DecimalField(max_digits=12, decimal_places=2)
@@ -610,6 +619,13 @@ class AddonTieredPricing(models.Model):
 # 7. DISCOUNTS & COUPONS
 
 class AddonDiscountCoupon(models.Model):
+    Name = models.CharField(max_length=150, blank=True, default='')
+    Kind = models.CharField(max_length=10, choices=[('Discount', 'Discount'), ('Coupon', 'Coupon')], default='Coupon')
+    Applicability = models.CharField(max_length=15, choices=[('Subscription', 'Subscription'), ('Add-on', 'Add-on'), ('All', 'All')], default='Add-on')
+    Scope = models.CharField(max_length=15, choices=[('All', 'All'), ('New', 'New'), ('Existing', 'Existing')], default='All')
+    Applicable_Products = models.ManyToManyField('ProductMaster', blank=True, related_name='DiscountCoupons')
+    Applicable_Plans = models.ManyToManyField('Plan', blank=True, related_name='DiscountCoupons')
+    Per_Customer_Limit = models.PositiveIntegerField(blank=True, null=True)
     AddonDiscountCoupon_Id = models.CharField(max_length=50,unique=True,default=AddonDiscountCoupon_I)   
     Coupon_Code = models.CharField(max_length=50, unique=True)
     Discount_Type = models.CharField(max_length=100,blank=True,null=True)
