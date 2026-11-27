@@ -6251,21 +6251,23 @@ class planfilter(ListAPIView):
     def get(self,request,*args,**kwargs):
         try:
             data=request.query_params
-            db=request.headers
-            Created_Date=[data['fromdate'],data['todate']]
             data1 = {
-                "Plan_Name__icontains": data['Plan_Name'],
-                "Currency_Type__icontains": data['Currency_Type'],
+                "Plan_Name__icontains": data.get('Plan_Name', ''),
+                "Currency_Type__icontains": data.get('Currency_Type', ''),
                 "Is_Deleted": False,
-                "Created_Date__range": Created_Date
             }
+            if data.get('fromdate') and data.get('todate'):
+                data1["Created_Date__date__range"] = [data['fromdate'], data['todate']]
             if data.get('Product'):
                 prod_val = str(data['Product']).strip()
-                if prod_val.isdigit():
-                    data1["Product_id"] = int(prod_val)
-                else:
-                    data1["Product__Product_Name__icontains"] = prod_val
-            return requestget(model=Plan, serializer=Planserializer, data=data1, page=data['page'], Operator='and')
+                if prod_val.lower() not in ('all', 'all products'):
+                    if prod_val.isdigit():
+                        data1["Product_id"] = int(prod_val)
+                    else:
+                        data1["Product__Product_Name__icontains"] = prod_val
+            if data.get('Plantype') and str(data.get('Plantype')).lower() != 'all':
+                data1["Plantype__iexact"] = data['Plantype']
+            return requestget(model=Plan, serializer=Planserializer, data=data1, page=data.get('page', 1), Operator='and')
         except Exception as e:
             output = JSONRenderer().render({"Error": str(e)})
             return HttpResponse(output, content_type='application/json', status=status.HTTP_400_BAD_REQUEST)
@@ -6340,28 +6342,172 @@ class ProductDropdownAPI(APIView):
         ]
         return Response(data, status=status.HTTP_200_OK)
 
+def _next_plan_id():
+    """Return the next safe PLA-prefixed sequential Plan_Id regardless of legacy Plan_Id formats."""
+    max_num = 0
+    for pid in Plan.objects.values_list('Plan_Id', flat=True):
+        if pid:
+            match = re.match(r'^PLA(\d+)$', str(pid).strip(), re.IGNORECASE)
+            if match:
+                max_num = max(max_num, int(match.group(1)))
+    return 'PLA' + str(max_num + 1).zfill(9)
+
+
+def _filter_plan_queryset(data):
+    """Filter non-deleted Plan rows cleanly across Product, Plan type, billing cycle, status, and search."""
+    queryset = (
+        Plan.objects.select_related('Product')
+        .prefetch_related('AllocatedAddons', 'plan_features__Feature_Id', 'plan_limits')
+        .filter(Is_Deleted=False)
+        .order_by('-id')
+    )
+
+    search = str(data.get('search') or data.get('q') or '').strip()
+    if search:
+        queryset = queryset.filter(
+            Q(Plan_Name__icontains=search)
+            | Q(Plan_Id__icontains=search)
+            | Q(Description__icontains=search)
+            | Q(Plantype__icontains=search)
+            | Q(Currency_Type__icontains=search)
+            | Q(Product__Product_Name__icontains=search)
+            | Q(Product__Product_Code__icontains=search)
+        )
+
+    prod_val = data.get('Product_id') or data.get('Product') or data.get('product') or data.get('product_id')
+    if prod_val is not None:
+        prod_str = str(prod_val).strip()
+        if prod_str and prod_str.lower() not in ('all', 'all products', 'none', 'null'):
+            if prod_str.isdigit():
+                queryset = queryset.filter(Product_id=int(prod_str))
+            else:
+                queryset = queryset.filter(
+                    Q(Product__Product_Code__iexact=prod_str)
+                    | Q(Product__Product_Name__iexact=prod_str)
+                    | Q(Product__Product_Name__icontains=prod_str)
+                )
+
+    plantype = str(data.get('Plantype') or data.get('plantype') or '').strip()
+    if plantype and plantype.lower() not in ('all', 'all types'):
+        if plantype.lower() == 'free':
+            queryset = queryset.filter(
+                Q(Plantype__iexact='Free')
+                | (Q(UnitPrice=0) & (Q(Planmonth_price=0) | Q(Planmonth_price__isnull=True)))
+            )
+        elif plantype.lower() == 'paid':
+            queryset = queryset.filter(
+                Q(Plantype__iexact='Paid')
+                | (~Q(Plantype__iexact='Free') & (Q(UnitPrice__gt=0) | Q(Planmonth_price__gt=0) | Q(Planyear_price__gt=0)))
+            )
+        else:
+            queryset = queryset.filter(Plantype__iexact=plantype)
+
+    status_val = str(data.get('status') or data.get('Status') or '').strip()
+    if status_val and status_val.lower() not in ('all', 'all status'):
+        if status_val.lower() == 'active':
+            queryset = queryset.filter(Is_Active_Flg=True).exclude(Is_Archived=True)
+        elif status_val.lower() in ('draft', 'inactive'):
+            queryset = queryset.filter(Is_Active_Flg=False)
+        elif status_val.lower() == 'archived':
+            queryset = queryset.filter(Is_Archived=True)
+
+    billing_cycle = str(data.get('billing_cycle') or data.get('Billing_Cycle') or '').strip()
+    if billing_cycle and billing_cycle.lower() != 'all':
+        queryset = queryset.filter(billing_cycle__iexact=billing_cycle)
+
+    currency = str(data.get('Currency_Type') or data.get('currency') or '').strip()
+    if currency and currency.lower() != 'all':
+        queryset = queryset.filter(Currency_Type__iexact=currency)
+
+    ids_raw = data.get('ids')
+    if ids_raw:
+        if isinstance(ids_raw, list):
+            selected_ids = [int(i) for i in ids_raw if str(i).strip().isdigit()]
+        else:
+            selected_ids = [int(i) for i in str(ids_raw).split(',') if i.strip().isdigit()]
+        if selected_ids:
+            queryset = queryset.filter(id__in=selected_ids)
+
+    fromdate = data.get('fromdate')
+    todate = data.get('todate')
+    if fromdate and todate:
+        queryset = queryset.filter(Created_Date__date__range=[fromdate, todate])
+
+    return queryset
+
+
+def _sync_plan_extras(plan, raw_data, addons=None, modules=None):
+    """Synchronize optional addons, feature lists, and PlanFeature rows after saving a Plan."""
+    if addons is not None:
+        addon_objs = AddonMaster.objects.filter(id__in=addons) if addons else []
+        plan.AllocatedAddons.set(addon_objs)
+
+    if modules is not None and hasattr(plan, 'Modules'):
+        module_objs = ModuleMaster.objects.filter(id__in=modules)
+        plan.Modules.set(module_objs)
+
+    features = raw_data.get('features') or raw_data.get('featuresIncluded')
+    if isinstance(features, list):
+        clean_features = [str(f).strip() for f in features if str(f).strip()]
+        if not raw_data.get('Plan_price'):
+            plan.Plan_price = [{"feature_name": f, "price": 0} for f in clean_features]
+            plan.save(update_fields=['Plan_price'])
+
+        if plan.Product:
+            for fname in clean_features:
+                pf_obj = ProductFeature.objects.filter(
+                    Product_Id=plan.Product,
+                    Feature_Name__iexact=fname,
+                    Is_Deleted=False,
+                ).first()
+                if pf_obj:
+                    PlanFeature.objects.update_or_create(
+                        Plan_Id=plan,
+                        Feature_Id=pf_obj,
+                        defaults={'Is_Included': True, 'Is_Active': True, 'Is_Deleted': False},
+                    )
+
+
 class planCRUD(APIView):
     queryset = Plan.objects.all()
+
     def post(self, request, *args, **kwargs):
         try:
             if not request.data:
                 raise TypeError("Empty payload")
             data = request.data.copy()
-            data['Plan_Id'] = 'PLA' + str(ID(Plan, Planserializer, "Plan_Id"))
-            addons = data.pop("addons", [])
+            requested_plan_id = str(data.get('Plan_Id') or '').strip()
+            if requested_plan_id and len(requested_plan_id) <= 20 and not Plan.objects.filter(Plan_Id__iexact=requested_plan_id).exists():
+                data['Plan_Id'] = requested_plan_id
+            else:
+                data['Plan_Id'] = _next_plan_id()
+
+            addons = data.pop("addons", data.pop("AllocatedAddons", []))
             feature_list = data.get("Plan_price", [])
             if feature_list and not isinstance(feature_list, list):
                 return HttpResponse(
                     JSONRenderer().render({"error": "Plan_price must be a list"}),
+                    content_type='application/json',
                     status=400)
+
+            features_input = data.get('features') or data.get('featuresIncluded')
+            if isinstance(features_input, list) and not feature_list:
+                data['Plan_price'] = [{"feature_name": str(f).strip(), "price": 0} for f in features_input if str(f).strip()]
+
+            if data.get('Planmonth_price') not in (None, '') and data.get('UnitPrice') in (None, ''):
+                data['UnitPrice'] = float(data['Planmonth_price'])
+            if 'Plan_per_month' not in data:
+                data['Plan_per_month'] = str(data.get('billing_cycle', 'monthly')).lower() != 'yearly'
+            if 'Plan_per_year' not in data and data.get('Planyear_price') not in (None, ''):
+                data['Plan_per_year'] = True
+
             serializer = Planserializer(data=data)
             if serializer.is_valid():
                 plan = serializer.save()
-                if addons:
-                    plan.AllocatedAddons.set(addons)
+                _sync_plan_extras(plan, request.data, addons=addons)
                 output = JSONRenderer().render(Planserializers(plan).data)
                 return HttpResponse(output, content_type='application/json', status=201)
-            return HttpResponse(JSONRenderer().render(serializer.errors), status=400)
+            return HttpResponse(JSONRenderer().render(serializer.errors), content_type='application/json', status=400)
         except Exception as e:
             return HttpResponse(
                 JSONRenderer().render({"Error": str(e)}),
@@ -6371,11 +6517,25 @@ class planCRUD(APIView):
     def get(self, request, *args, **kwargs):
         try:
             data = request.query_params
-            id = data['id']
-            module = Plan.objects.get(id=id)
-            serializer = Planserializers(module)
-            output = JSONRenderer().render(serializer.data)
-            return HttpResponse(output, content_type='application/json')
+            plan_pk = data.get('id')
+            plan_code = data.get('Plan_Id')
+            if plan_pk or plan_code:
+                if plan_pk:
+                    module = Plan.objects.get(id=plan_pk, Is_Deleted=False)
+                else:
+                    module = Plan.objects.get(Plan_Id=plan_code, Is_Deleted=False)
+                serializer = Planserializers(module)
+                return HttpResponse(JSONRenderer().render(serializer.data), content_type='application/json')
+
+            queryset = _filter_plan_queryset(data)
+            serialized = Planserializer(queryset, many=True).data
+            return HttpResponse(
+                JSONRenderer().render({"status": True, "count": len(serialized), "results": serialized}),
+                content_type='application/json',
+                status=200,
+            )
+        except Plan.DoesNotExist:
+            return HttpResponse(JSONRenderer().render({"Error": "Plan not found"}), content_type='application/json', status=404)
         except Exception as e:
             output = JSONRenderer().render({"Error": str(e)})
             return HttpResponse(output, content_type='application/json', status=status.HTTP_400_BAD_REQUEST)
@@ -6383,75 +6543,448 @@ class planCRUD(APIView):
     def put(self, request, *args, **kwargs):
         try:
             data = request.data.copy()
-            if "id" not in data:
+            plan_pk = data.get("id") or request.query_params.get("id")
+            plan_code = data.get("Plan_Id") or request.query_params.get("Plan_Id")
+            if not plan_pk and not plan_code:
                 return HttpResponse(
                     JSONRenderer().render({"error": "id is required"}),
+                    content_type='application/json',
                     status=400)
-            plan = Plan.objects.get(id=data["id"], Is_Deleted=False)
-            addons = data.pop("addons", None)
+            plan = Plan.objects.get(id=plan_pk, Is_Deleted=False) if plan_pk else Plan.objects.get(Plan_Id=plan_code, Is_Deleted=False)
+            addons = data.pop("addons", data.pop("AllocatedAddons", None))
             feature_list = data.get("Plan_price", None)
             if feature_list is not None and not isinstance(feature_list, list):
                 return HttpResponse(
                     JSONRenderer().render({"error": "Plan_price must be a list"}),
+                    content_type='application/json',
                     status=400)
+
+            features_input = data.get('features') or data.get('featuresIncluded')
+            if isinstance(features_input, list) and feature_list is None:
+                data['Plan_price'] = [{"feature_name": str(f).strip(), "price": 0} for f in features_input if str(f).strip()]
+
+            if data.get('Planmonth_price') not in (None, '') and 'UnitPrice' not in data:
+                data['UnitPrice'] = float(data['Planmonth_price'])
+
             serializer = Planserializer(plan, data=data, partial=True)
             if serializer.is_valid():
-                plan = serializer.save()
-                if addons is not None:
-                    plan.AllocatedAddons.set(addons)
+                plan = serializer.save(Updated_Date=timezone.now())
+                _sync_plan_extras(plan, request.data, addons=addons)
                 output = JSONRenderer().render(Planserializers(plan).data)
                 return HttpResponse(output, content_type='application/json')
-            return HttpResponse(JSONRenderer().render(serializer.errors), status=400)
+            return HttpResponse(JSONRenderer().render(serializer.errors), content_type='application/json', status=400)
         except Plan.DoesNotExist:
             return HttpResponse(
                 JSONRenderer().render({"Error": "Plan not found"}),
+                content_type='application/json',
                 status=404)
         except Exception as e:
             return HttpResponse(
                 JSONRenderer().render({"Error": str(e)}),
                 content_type='application/json',
                 status=400)
+
     def delete(self, request, *args, **kwargs):
         try:
-            data = request.query_params
-            id = data['id']
-            module = Plan.objects.get(id=id)
+            plan_pk = request.query_params.get('id') or (request.data.get('id') if hasattr(request, 'data') and isinstance(request.data, dict) else None)
+            plan_code = request.query_params.get('Plan_Id') or (request.data.get('Plan_Id') if hasattr(request, 'data') and isinstance(request.data, dict) else None)
+            if not plan_pk and not plan_code:
+                return HttpResponse(JSONRenderer().render({"Error": "id is required"}), content_type='application/json', status=400)
+            module = Plan.objects.get(id=plan_pk) if plan_pk else Plan.objects.get(Plan_Id=plan_code)
             serializer = Planserializer(module, {"Is_Deleted": True}, partial=True)
             if serializer.is_valid():
-                serializer.save()
-            output = JSONRenderer().render(serializer.data)
-            return HttpResponse(output, content_type='application/json')
+                serializer.save(Updated_Date=timezone.now())
+            return HttpResponse(
+                JSONRenderer().render({"status": True, "message": "Plan deleted successfully", "id": module.id}),
+                content_type='application/json',
+                status=200,
+            )
+        except Plan.DoesNotExist:
+            return HttpResponse(JSONRenderer().render({"Error": "Plan not found"}), content_type='application/json', status=404)
         except Exception as e:
             output = JSONRenderer().render({"Error": str(e)})
             return HttpResponse(output, content_type='application/json', status=status.HTTP_400_BAD_REQUEST)
 
     def patch(self, request, *args, **kwargs):
         try:
-            # Fetch Plan
-
             data = request.data.copy()
             plan = Plan.objects.get(id=data['id'], Is_Deleted=False)
             modules = data.pop("Modules", None)
-            if modules is not None:
-                module_objs = ModuleMaster.objects.filter(id__in=modules)
-                plan.Modules.set(module_objs)
-            addons = data.pop("AllocatedAddons", None)
-            if addons is not None:
-                addon_objs = AddonMaster.objects.filter(id__in=addons)
-                plan.AllocatedAddons.set(addon_objs)
-            serializer = Planserializer(plan,data=data,partial=True)
+            addons = data.pop("AllocatedAddons", data.pop("addons", None))
+            serializer = Planserializer(plan, data=data, partial=True)
             if serializer.is_valid():
-                serializer.save(Updated_Date=timezone.now())
-                return Response({"status": True,"message": "Plan updated successfully","data": serializer.data},status=status.HTTP_200_OK)
-            return Response({"status": False,"errors": serializer.errors},status=status.HTTP_400_BAD_REQUEST)
+                plan = serializer.save(Updated_Date=timezone.now())
+                _sync_plan_extras(plan, request.data, addons=addons, modules=modules)
+                return Response({"status": True, "message": "Plan updated successfully", "data": Planserializer(plan).data}, status=status.HTTP_200_OK)
+            return Response({"status": False, "errors": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
         except Plan.DoesNotExist:
             return Response(
-                {"status": False,"message": "Plan not found"},
+                {"status": False, "message": "Plan not found"},
                 status=status.HTTP_404_NOT_FOUND)
         except Exception as e:
             return Response(
-                {"status": False,"message": str(e)},
+                {"status": False, "message": str(e)},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class PlanMasterFilterAPI(APIView):
+    """Flexible filter endpoint for Plan cards across product, plan type, status, billing cycle, and search."""
+    def get(self, request, *args, **kwargs):
+        return self._filter(request.query_params)
+
+    def post(self, request, *args, **kwargs):
+        return self._filter(request.data)
+
+    def _filter(self, data):
+        try:
+            queryset = _filter_plan_queryset(data)
+            serialized = Planserializer(queryset, many=True).data
+            return HttpResponse(
+                JSONRenderer().render({"status": True, "count": len(serialized), "results": serialized}),
+                content_type='application/json',
+                status=status.HTTP_200_OK,
+            )
+        except Exception as e:
+            return HttpResponse(
+                JSONRenderer().render({"status": False, "Error": str(e)}),
+                content_type='application/json',
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+
+class PlanComparisonMatrixAPI(APIView):
+    """Aggregates Plan comparison matrix features & PlanLimit quotas for Free & Paid Plans UI."""
+    def _build_matrix_payload(self, data):
+        plans_qs = list(_filter_plan_queryset(data).order_by('UnitPrice', 'Planmonth_price', 'id'))
+        serialized_plans = Planserializer(plans_qs, many=True).data
+
+        prod_val = data.get('Product_id') or data.get('Product') or data.get('product') or data.get('product_id')
+        product_obj = None
+        if prod_val and str(prod_val).strip().lower() not in ('all', 'all products', 'none', 'null'):
+            if str(prod_val).strip().isdigit():
+                product_obj = ProductMaster.objects.filter(id=int(prod_val), Is_Deleted=False).first()
+            else:
+                product_obj = ProductMaster.objects.filter(
+                    Q(Product_Code__iexact=str(prod_val).strip()) | Q(Product_Name__iexact=str(prod_val).strip()),
+                    Is_Deleted=False,
+                ).first()
+
+        catalog_features_qs = ProductFeature.objects.filter(Is_Deleted=False, Is_Active=True)
+        if product_obj:
+            catalog_features_qs = catalog_features_qs.filter(Product_Id=product_obj)
+        catalog_features = [
+            {
+                "id": pf.id,
+                "Feature_Id": pf.Feature_Id,
+                "Feature_Code": pf.Feature_Code,
+                "Feature_Name": pf.Feature_Name,
+                "Product_Id": pf.Product_Id_id,
+                "Description": pf.Description,
+            }
+            for pf in catalog_features_qs.order_by('id')
+        ]
+
+        plan_ids = [p.id for p in plans_qs]
+        plan_feature_map = {}
+        for row in PlanFeature.objects.filter(Plan_Id_id__in=plan_ids, Is_Deleted=False, Is_Active=True).select_related('Feature_Id'):
+            if row.Feature_Id:
+                key = row.Feature_Id.Feature_Name.strip().lower()
+                plan_feature_map[(row.Plan_Id_id, key)] = {
+                    "id": row.id,
+                    "Feature_Id": row.Feature_Id_id,
+                    "Feature_Name": row.Feature_Id.Feature_Name,
+                    "Is_Included": bool(row.Is_Included),
+                    "Feature_Price": float(row.Feature_Price or 0),
+                }
+
+        feature_names_ordered = []
+        seen_names = set()
+        for cf in catalog_features:
+            name = str(cf["Feature_Name"]).strip()
+            if name and name.lower() not in seen_names:
+                seen_names.add(name.lower())
+                feature_names_ordered.append((name, cf["id"]))
+
+        for sp in serialized_plans:
+            for fname in sp.get("features") or []:
+                clean = str(fname).strip()
+                if clean and clean.lower() not in seen_names:
+                    seen_names.add(clean.lower())
+                    feature_names_ordered.append((clean, None))
+
+        features_matrix = []
+        for fname, feature_pk in feature_names_ordered:
+            fkey = fname.lower()
+            cells = {}
+            for sp in serialized_plans:
+                pid = sp["id"]
+                mapped = plan_feature_map.get((pid, fkey))
+                if mapped is not None:
+                    cells[str(pid)] = {
+                        "included": mapped["Is_Included"],
+                        "price": mapped["Feature_Price"],
+                        "plan_feature_id": mapped["id"],
+                    }
+                else:
+                    included_in_plan = any(str(f).strip().lower() == fkey for f in (sp.get("features") or []))
+                    cells[str(pid)] = {
+                        "included": included_in_plan,
+                        "price": 0,
+                        "plan_feature_id": None,
+                    }
+            features_matrix.append({
+                "feature_name": fname,
+                "feature_id": feature_pk,
+                "cells": cells,
+            })
+
+        limit_rows = []
+        for lim in PlanLimit.objects.filter(Plan_Id_id__in=plan_ids, Is_Deleted=False, Is_Active=True).select_related('Plan_Id').order_by('Plan_Id_id', 'id'):
+            limit_rows.append({
+                "id": lim.id,
+                "PlanLimit_Id": lim.PlanLimit_Id,
+                "Plan_Id": lim.Plan_Id_id,
+                "Plan_Name": lim.Plan_Id.Plan_Name if lim.Plan_Id else None,
+                "Limit_Name": lim.Limit_Name,
+                "Limit_Code": lim.Limit_Code,
+                "Limit_Value": float(lim.Limit_Value) if lim.Limit_Value is not None else None,
+                "Unit": lim.Unit,
+                "Is_Unlimited": lim.Is_Unlimited,
+            })
+
+        return {
+            "status": True,
+            "product": product_obj.Product_Name if product_obj else "All Products",
+            "product_id": product_obj.id if product_obj else None,
+            "plans": serialized_plans,
+            "catalog_features": catalog_features,
+            "features_matrix": features_matrix,
+            "usage_limits": limit_rows,
+        }
+
+    def get(self, request, *args, **kwargs):
+        try:
+            payload = self._build_matrix_payload(request.query_params)
+            return HttpResponse(JSONRenderer().render(payload), content_type='application/json', status=status.HTTP_200_OK)
+        except Exception as e:
+            return HttpResponse(JSONRenderer().render({"status": False, "Error": str(e)}), content_type='application/json', status=status.HTTP_400_BAD_REQUEST)
+
+    def post(self, request, *args, **kwargs):
+        try:
+            data = request.data or {}
+            action = str(data.get("action") or "toggle_feature").strip().lower()
+
+            if action == "toggle_feature":
+                plan_id = data.get("plan_id") or data.get("Plan_Id")
+                feature_name = str(data.get("feature_name") or "").strip()
+                feature_id = data.get("feature_id") or data.get("Feature_Id")
+                is_included = bool(data.get("is_included", True))
+                plan = Plan.objects.get(id=plan_id, Is_Deleted=False)
+
+                feature_obj = None
+                if feature_id:
+                    feature_obj = ProductFeature.objects.filter(id=feature_id, Is_Deleted=False).first()
+                if not feature_obj and feature_name and plan.Product:
+                    feature_obj = ProductFeature.objects.filter(
+                        Product_Id=plan.Product,
+                        Feature_Name__iexact=feature_name,
+                        Is_Deleted=False,
+                    ).first()
+                    if not feature_obj:
+                        feature_obj = ProductFeature.objects.create(
+                            Product_Id=plan.Product,
+                            Feature_Code=feature_name.upper().replace(" ", "_")[:50],
+                            Feature_Name=feature_name[:150],
+                            Description=feature_name,
+                            Is_Active=True,
+                            Is_Deleted=False,
+                        )
+
+                if feature_obj:
+                    PlanFeature.objects.update_or_create(
+                        Plan_Id=plan,
+                        Feature_Id=feature_obj,
+                        defaults={"Is_Included": is_included, "Is_Active": True, "Is_Deleted": False},
+                    )
+
+                current_items = list(plan.Plan_price) if isinstance(plan.Plan_price, list) else []
+                label = feature_name or (feature_obj.Feature_Name if feature_obj else "")
+                if label:
+                    filtered_items = [
+                        item for item in current_items
+                        if (item.get("feature_name") if isinstance(item, dict) else str(item)).strip().lower() != label.lower()
+                    ]
+                    if is_included:
+                        filtered_items.append({"feature_name": label, "price": float(data.get("feature_price", 0) or 0)})
+                    plan.Plan_price = filtered_items
+                    plan.save(update_fields=["Plan_price", "Updated_Date"])
+
+                return HttpResponse(
+                    JSONRenderer().render({"status": True, "message": "Plan feature matrix updated"}),
+                    content_type='application/json',
+                    status=status.HTTP_200_OK,
+                )
+
+            if action == "upsert_limit":
+                plan_id = data.get("plan_id") or data.get("Plan_Id")
+                plan = Plan.objects.get(id=plan_id, Is_Deleted=False)
+                limit_id = data.get("id")
+                limit_code = str(data.get("Limit_Code") or data.get("limit_code") or "").strip().upper()
+                limit_name = str(data.get("Limit_Name") or data.get("limit_name") or limit_code).strip()
+                if not limit_code and limit_name:
+                    limit_code = re.sub(r'[^A-Z0-9]+', '_', limit_name.upper()).strip('_')[:100]
+                is_unlimited = bool(data.get("Is_Unlimited", data.get("is_unlimited", False)))
+                raw_val = data.get("Limit_Value", data.get("limit_value"))
+                limit_val = None if is_unlimited or raw_val in (None, '') else float(raw_val)
+                unit = str(data.get("Unit") or data.get("unit") or "").strip()
+
+                defaults = {
+                    "Limit_Name": limit_name,
+                    "Limit_Code": limit_code,
+                    "Limit_Value": limit_val,
+                    "Unit": unit,
+                    "Is_Unlimited": is_unlimited,
+                    "Is_Active": True,
+                    "Is_Deleted": False,
+                }
+                if limit_id:
+                    lim_obj = PlanLimit.objects.get(id=limit_id, Is_Deleted=False)
+                    for k, v in defaults.items():
+                        setattr(lim_obj, k, v)
+                    lim_obj.save()
+                else:
+                    lim_obj, _ = PlanLimit.objects.update_or_create(
+                        Plan_Id=plan,
+                        Limit_Code=limit_code,
+                        defaults=defaults,
+                    )
+                return HttpResponse(
+                    JSONRenderer().render({"status": True, "message": "Plan limit saved", "limit": PlanLimitSerializer(lim_obj).data}),
+                    content_type='application/json',
+                    status=status.HTTP_200_OK,
+                )
+
+            if action == "delete_limit":
+                limit_id = data.get("id")
+                lim_obj = PlanLimit.objects.get(id=limit_id)
+                lim_obj.Is_Deleted = True
+                lim_obj.save(update_fields=["Is_Deleted"])
+                return HttpResponse(
+                    JSONRenderer().render({"status": True, "message": "Plan limit removed", "id": limit_id}),
+                    content_type='application/json',
+                    status=status.HTTP_200_OK,
+                )
+
+            return HttpResponse(JSONRenderer().render({"status": False, "Error": f"Unknown action: {action}"}), content_type='application/json', status=400)
+        except Plan.DoesNotExist:
+            return HttpResponse(JSONRenderer().render({"status": False, "Error": "Plan not found"}), content_type='application/json', status=404)
+        except Exception as e:
+            return HttpResponse(JSONRenderer().render({"status": False, "Error": str(e)}), content_type='application/json', status=400)
+
+
+class PlanComparisonExportAPI(APIView):
+    """Exports Plans and their Feature Comparison Matrix & Limits as UTF-8 CSV."""
+    def perform_content_negotiation(self, request, force=False):
+        renderers = self.get_renderers()
+        return renderers[0], renderers[0].media_type
+
+    def get(self, request, *args, **kwargs):
+        return self._export(request.query_params)
+
+    def post(self, request, *args, **kwargs):
+        return self._export(request.data)
+
+    def _export(self, data):
+        try:
+            import io
+            matrix = PlanComparisonMatrixAPI()._build_matrix_payload(data)
+            plans = matrix["plans"]
+            features_matrix = matrix["features_matrix"]
+
+            output = io.StringIO()
+            output.write('\ufeff')
+            writer = csv.writer(output)
+            writer.writerow([
+                "Plan Code", "Plan Name", "Product", "Plan Type", "Currency",
+                "Monthly Price", "Annual Price", "Unit Price", "Billing Cycle",
+                "Trial Days", "Max Users", "Storage (GB)", "Status", "Included Features",
+            ])
+            for p in plans:
+                writer.writerow([
+                    p.get("Plan_Id") or "",
+                    p.get("Plan_Name") or "",
+                    p.get("Product_name") or p.get("Product") or "",
+                    p.get("Plantype") or "",
+                    p.get("Currency_Type") or "INR",
+                    p.get("Planmonth_price") if p.get("Planmonth_price") is not None else "",
+                    p.get("Planyear_price") if p.get("Planyear_price") is not None else "",
+                    p.get("UnitPrice") if p.get("UnitPrice") is not None else "",
+                    p.get("billing_cycle") or "",
+                    p.get("Trialperiod") if p.get("Trialperiod") is not None else 0,
+                    p.get("No_Of_Users") if p.get("No_Of_Users") is not None else "",
+                    p.get("AllocatedStorage") if p.get("AllocatedStorage") is not None else "",
+                    "Active" if p.get("Is_Active_Flg") is not False else "Draft",
+                    "; ".join(p.get("features") or []),
+                ])
+
+            if features_matrix and plans:
+                writer.writerow([])
+                writer.writerow(["Feature Comparison Matrix", *[p.get("Plan_Name") or p.get("Plan_Id") for p in plans]])
+                for row in features_matrix:
+                    writer.writerow([
+                        row["feature_name"],
+                        *["Included" if (row["cells"].get(str(p["id"])) or {}).get("included") else "No" for p in plans],
+                    ])
+
+            response = HttpResponse(output.getvalue(), content_type="text/csv; charset=utf-8")
+            response["Content-Disposition"] = 'attachment; filename="plans_comparison_export.csv"'
+            return response
+        except Exception as e:
+            return HttpResponse(JSONRenderer().render({"Error": str(e)}), content_type='application/json', status=status.HTTP_400_BAD_REQUEST)
+
+
+class PlanPublishAPI(APIView):
+    """Publishes active/draft plans for a product or selected plan IDs so they go live in catalogs."""
+    def post(self, request, *args, **kwargs):
+        try:
+            data = request.data or {}
+            plan_ids = data.get("plan_ids")
+            if isinstance(plan_ids, list) and plan_ids:
+                qs = Plan.objects.filter(id__in=plan_ids, Is_Deleted=False)
+            else:
+                qs = _filter_plan_queryset(data).filter(Is_Deleted=False)
+
+            target_ids = list(qs.values_list("id", flat=True))
+            updated = qs.update(Is_Active_Flg=True, Is_Archived=False, Updated_Date=timezone.now())
+
+            prod_val = data.get("Product_id") or data.get("Product") or data.get("product") or data.get("product_id")
+            if prod_val and str(prod_val).strip().lower() not in ("all", "all products", "none", "null"):
+                cfg_qs = ProductConfiguration.objects.filter(Is_Deleted=False)
+                if str(prod_val).strip().isdigit():
+                    cfg_qs = cfg_qs.filter(Product_Id_id=int(prod_val))
+                else:
+                    cfg_qs = cfg_qs.filter(
+                        Q(Product_Id__Product_Code__iexact=str(prod_val).strip())
+                        | Q(Product_Id__Product_Name__iexact=str(prod_val).strip())
+                    )
+                cfg_qs.update(Configuration_Status="Published", Updated_Date=timezone.now())
+
+            return HttpResponse(
+                JSONRenderer().render({
+                    "status": True,
+                    "published_count": updated,
+                    "published_plan_ids": target_ids,
+                    "message": f"{updated} subscription plan(s) published successfully.",
+                }),
+                content_type="application/json",
+                status=status.HTTP_200_OK,
+            )
+        except Exception as e:
+            return HttpResponse(
+                JSONRenderer().render({"status": False, "Error": str(e)}),
+                content_type="application/json",
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
 
 class PlanFeatures(ListAPIView):
@@ -18524,6 +19057,441 @@ class PartnerAssignMailAPI(APIView):
         except Exception as e:
             logger.exception("Lead partner assignment failed")
             return json_response({"Error": str(e)}, status.HTTP_400_BAD_REQUEST)
+
+
+# ========================================== Product Pricing =========================================== #
+
+def _next_product_pricing_id():
+    max_num = 781
+    for pid in ProductPricing.objects.values_list('Pricing_Id', flat=True):
+        if pid:
+            m = re.match(r'^PRC-(\d+)$', str(pid).strip(), re.IGNORECASE)
+            if m:
+                max_num = max(max_num, int(m.group(1)))
+    return f"PRC-{str(max_num + 1).zfill(6)}"
+
+
+def _next_price_history_id():
+    max_num = 0
+    for hid in ProductPriceHistory.objects.values_list('History_Id', flat=True):
+        if hid:
+            m = re.match(r'^PPH-(\d+)$', str(hid).strip(), re.IGNORECASE)
+            if m:
+                max_num = max(max_num, int(m.group(1)))
+    return f"PPH-{str(max_num + 1).zfill(6)}"
+
+
+def _filter_product_pricing_queryset(data):
+    qs = (
+        ProductPricing.objects.select_related('Product_Id', 'Edition_Id', 'Plan_Id')
+        .filter(Is_Deleted=False)
+        .order_by('-id')
+    )
+
+    search = str(data.get('search') or data.get('q') or '').strip()
+    if search:
+        qs = qs.filter(
+            Q(Pricing_Id__icontains=search)
+            | Q(Pricing_Code__icontains=search)
+            | Q(Product_Id__Product_Name__icontains=search)
+            | Q(Country__icontains=search)
+            | Q(Currency__icontains=search)
+            | Q(Plan_Id__Plan_Name__icontains=search)
+            | Q(Edition_Id__Edition_Name__icontains=search)
+        )
+
+    prod = str(data.get('Product_Id') or data.get('Product') or data.get('product') or '').strip()
+    if prod and prod.lower() not in ('all', 'all products', 'none', 'null'):
+        if prod.isdigit():
+            qs = qs.filter(Product_Id_id=int(prod))
+        else:
+            qs = qs.filter(Q(Product_Id__Product_Name__iexact=prod) | Q(Product_Id__Product_Code__iexact=prod))
+
+    edition = str(data.get('Edition') or data.get('Edition_Id') or '').strip()
+    if edition and edition.lower() not in ('all', 'all editions'):
+        if edition.isdigit():
+            qs = qs.filter(Edition_Id_id=int(edition))
+        else:
+            qs = qs.filter(
+                Q(Edition_Id__Edition_Name__iexact=edition)
+                | Q(Applicability__edition_label__iexact=edition)
+            )
+
+    plan = str(data.get('Plan') or data.get('Plan_Id') or '').strip()
+    if plan and plan.lower() not in ('all', 'all plans'):
+        if plan.isdigit():
+            qs = qs.filter(Plan_Id_id=int(plan))
+        else:
+            qs = qs.filter(
+                Q(Plan_Id__Plan_Name__iexact=plan)
+                | Q(Applicability__plan_label__iexact=plan)
+            )
+
+    country = str(data.get('Country') or data.get('country') or '').strip()
+    if country and country.lower() not in ('all', 'all countries'):
+        qs = qs.filter(Country__iexact=country)
+
+    currency = str(data.get('Currency') or data.get('currency') or '').strip()
+    if currency and currency.lower() not in ('all', 'all currencies'):
+        code = currency.split(' ')[0].strip()
+        qs = qs.filter(Currency__iexact=code)
+
+    status_val = str(data.get('Status') or data.get('status') or '').strip()
+    if status_val and status_val.lower() not in ('all', 'all statuses'):
+        qs = qs.filter(Status__iexact=status_val)
+
+    billing = str(data.get('Billing_Cycle') or '').strip()
+    if billing and billing.lower() != 'all':
+        qs = qs.filter(Billing_Cycle__iexact=billing)
+
+    ids_raw = data.get('ids')
+    if ids_raw:
+        if isinstance(ids_raw, list):
+            selected_ids = [int(i) for i in ids_raw if str(i).strip().isdigit()]
+        else:
+            selected_ids = [int(i) for i in str(ids_raw).split(',') if i.strip().isdigit()]
+        if selected_ids:
+            qs = qs.filter(id__in=selected_ids)
+
+    return qs
+
+
+def _log_product_price_history(pricing_obj, old_price, new_price, reason, user=None, hist_status='Applied'):
+    app = pricing_obj.Applicability if isinstance(pricing_obj.Applicability, dict) else {}
+    ed_label = pricing_obj.Edition_Id.Edition_Name if pricing_obj.Edition_Id else app.get('edition_label', '')
+    prod_name = pricing_obj.Product_Id.Product_Name if pricing_obj.Product_Id else 'Product'
+    user_name = 'Super Admin'
+    if user and getattr(user, 'is_authenticated', False):
+        full = f"{getattr(user, 'First_Name', '') or ''} {getattr(user, 'Last_Name', '') or ''}".strip()
+        user_name = full or getattr(user, 'username', None) or 'Super Admin'
+    ProductPriceHistory.objects.create(
+        History_Id=_next_price_history_id(),
+        Product_Pricing=pricing_obj,
+        Pricing_Id=pricing_obj.Pricing_Id,
+        Product_Label=f"{prod_name} ({ed_label})" if ed_label else prod_name,
+        Old_Price=Decimal(str(old_price or 0)),
+        New_Price=Decimal(str(new_price or 0)),
+        Currency=pricing_obj.Currency or 'INR',
+        Reason=reason,
+        Changed_By=user if user and getattr(user, 'is_authenticated', False) else None,
+        Changed_By_Name=user_name,
+        Status=hist_status,
+    )
+
+
+class ProductPricingCRUD(APIView):
+    def get(self, request, *args, **kwargs):
+        try:
+            pk = request.query_params.get('id')
+            code = request.query_params.get('Pricing_Id')
+            if pk or code:
+                obj = ProductPricing.objects.get(id=pk, Is_Deleted=False) if pk else ProductPricing.objects.get(Pricing_Id=code, Is_Deleted=False)
+                return HttpResponse(JSONRenderer().render(ProductPricingSerializer(obj).data), content_type='application/json')
+
+            qs = _filter_product_pricing_queryset(request.query_params)
+            serialized = ProductPricingSerializer(qs, many=True).data
+            return HttpResponse(
+                JSONRenderer().render({"status": True, "count": len(serialized), "results": serialized}),
+                content_type='application/json',
+                status=200,
+            )
+        except ProductPricing.DoesNotExist:
+            return HttpResponse(JSONRenderer().render({"Error": "Pricing rule not found"}), content_type='application/json', status=404)
+        except Exception as e:
+            return HttpResponse(JSONRenderer().render({"Error": str(e)}), content_type='application/json', status=400)
+
+    def post(self, request, *args, **kwargs):
+        try:
+            data = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
+            req_id = str(data.get('Pricing_Id') or '').strip()
+            if not req_id or ProductPricing.objects.filter(Pricing_Id__iexact=req_id).exists():
+                data['Pricing_Id'] = _next_product_pricing_id()
+            ser = ProductPricingSerializer(data=data)
+            if ser.is_valid():
+                obj = ser.save()
+                _log_product_price_history(obj, 0, obj.Price, "Pricing rule created", getattr(request, 'user', None))
+                return HttpResponse(JSONRenderer().render(ProductPricingSerializer(obj).data), content_type='application/json', status=201)
+            return HttpResponse(JSONRenderer().render(ser.errors), content_type='application/json', status=400)
+        except Exception as e:
+            return HttpResponse(JSONRenderer().render({"Error": str(e)}), content_type='application/json', status=400)
+
+    def put(self, request, *args, **kwargs):
+        return self._update(request, partial=True)
+
+    def patch(self, request, *args, **kwargs):
+        return self._update(request, partial=True)
+
+    def _update(self, request, partial=True):
+        try:
+            data = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
+            pk = data.get('id') or request.query_params.get('id')
+            code = data.get('Pricing_Id') or request.query_params.get('Pricing_Id')
+            if not pk and not code:
+                return HttpResponse(JSONRenderer().render({"Error": "id or Pricing_Id is required"}), content_type='application/json', status=400)
+            obj = ProductPricing.objects.get(id=pk, Is_Deleted=False) if pk else ProductPricing.objects.get(Pricing_Id=code, Is_Deleted=False)
+            old_price = obj.Price
+            reason = str(data.pop('Reason', '') or 'Pricing rule updated')
+            ser = ProductPricingSerializer(obj, data=data, partial=partial)
+            if ser.is_valid():
+                updated = ser.save(Updated_Date=timezone.now())
+                if Decimal(str(old_price or 0)) != Decimal(str(updated.Price or 0)):
+                    _log_product_price_history(updated, old_price, updated.Price, reason, getattr(request, 'user', None))
+                return HttpResponse(JSONRenderer().render(ProductPricingSerializer(updated).data), content_type='application/json', status=200)
+            return HttpResponse(JSONRenderer().render(ser.errors), content_type='application/json', status=400)
+        except ProductPricing.DoesNotExist:
+            return HttpResponse(JSONRenderer().render({"Error": "Pricing rule not found"}), content_type='application/json', status=404)
+        except Exception as e:
+            return HttpResponse(JSONRenderer().render({"Error": str(e)}), content_type='application/json', status=400)
+
+    def delete(self, request, *args, **kwargs):
+        try:
+            pk = request.query_params.get('id')
+            if not pk:
+                return HttpResponse(JSONRenderer().render({"Error": "id is required"}), content_type='application/json', status=400)
+            obj = ProductPricing.objects.get(id=pk, Is_Deleted=False)
+            obj.Is_Deleted = True
+            obj.Updated_Date = timezone.now()
+            obj.save(update_fields=['Is_Deleted', 'Updated_Date'])
+            return HttpResponse(JSONRenderer().render({"status": True, "message": "Pricing rule deleted", "id": obj.id}), content_type='application/json', status=200)
+        except ProductPricing.DoesNotExist:
+            return HttpResponse(JSONRenderer().render({"Error": "Pricing rule not found"}), content_type='application/json', status=404)
+        except Exception as e:
+            return HttpResponse(JSONRenderer().render({"Error": str(e)}), content_type='application/json', status=400)
+
+
+class ProductPricingFilterAPI(APIView):
+    def get(self, request, *args, **kwargs):
+        return self._filter(request.query_params)
+
+    def post(self, request, *args, **kwargs):
+        return self._filter(request.data)
+
+    def _filter(self, data):
+        try:
+            qs = _filter_product_pricing_queryset(data)
+            serialized = ProductPricingSerializer(qs, many=True).data
+            return HttpResponse(
+                JSONRenderer().render({"status": True, "count": len(serialized), "results": serialized}),
+                content_type='application/json',
+                status=200,
+            )
+        except Exception as e:
+            return HttpResponse(JSONRenderer().render({"status": False, "Error": str(e)}), content_type='application/json', status=400)
+
+
+class ProductPricingKPIAPI(APIView):
+    def get(self, request, *args, **kwargs):
+        try:
+            qs = ProductPricing.objects.filter(Is_Deleted=False)
+            return HttpResponse(
+                JSONRenderer().render({
+                    "status": True,
+                    "total_rules": qs.count(),
+                    "active_prices": qs.filter(Status__iexact='Active').count(),
+                    "scheduled_prices": qs.filter(Status__iexact='Scheduled').count(),
+                    "expired_prices": qs.filter(Status__iexact='Expired').count(),
+                    "draft_prices": qs.filter(Status__iexact='Draft').count(),
+                }),
+                content_type='application/json',
+                status=200,
+            )
+        except Exception as e:
+            return HttpResponse(JSONRenderer().render({"status": False, "Error": str(e)}), content_type='application/json', status=400)
+
+
+class ProductPricingExportAPI(APIView):
+    def perform_content_negotiation(self, request, force=False):
+        renderers = self.get_renderers()
+        return renderers[0], renderers[0].media_type
+
+    def get(self, request, *args, **kwargs):
+        return self._export(request.query_params)
+
+    def post(self, request, *args, **kwargs):
+        return self._export(request.data)
+
+    def _export(self, data):
+        try:
+            import io
+            qs = _filter_product_pricing_queryset(data)
+            output = io.StringIO()
+            output.write('\ufeff')
+            writer = csv.writer(output)
+            writer.writerow([
+                "Pricing ID", "Product", "Edition", "Plan", "Country", "Currency",
+                "Price", "Billing Cycle", "Tax Treatment", "Tax Rate", "HSN/SAC", "Status",
+            ])
+            for r in qs:
+                app = r.Applicability if isinstance(r.Applicability, dict) else {}
+                writer.writerow([
+                    r.Pricing_Id,
+                    r.Product_Id.Product_Name if r.Product_Id else "",
+                    r.Edition_Id.Edition_Name if r.Edition_Id else app.get("edition_label", ""),
+                    r.Plan_Id.Plan_Name if r.Plan_Id else app.get("plan_label", ""),
+                    r.Country or "",
+                    r.Currency or "",
+                    float(r.Price or 0),
+                    r.Billing_Cycle or "",
+                    r.Tax_Treatment or "",
+                    r.Tax_Label or (f"{r.Tax_Rate}%" if r.Tax_Rate is not None else ""),
+                    r.HSN_SAC_Code or "",
+                    r.Status or "",
+                ])
+            resp = HttpResponse(output.getvalue(), content_type="text/csv; charset=utf-8")
+            resp["Content-Disposition"] = 'attachment; filename="product_pricing_export.csv"'
+            return resp
+        except Exception as e:
+            return HttpResponse(JSONRenderer().render({"Error": str(e)}), content_type='application/json', status=400)
+
+
+class ProductPriceMatrixAPI(APIView):
+    def get(self, request, *args, **kwargs):
+        try:
+            qs = _filter_product_pricing_queryset(request.query_params)
+            grouped = {}
+            for r in qs:
+                app = r.Applicability if isinstance(r.Applicability, dict) else {}
+                prod_name = r.Product_Id.Product_Name if r.Product_Id else "Product"
+                ed_name = r.Edition_Id.Edition_Name if r.Edition_Id else app.get("edition_label", "Standard")
+                cycle = r.Billing_Cycle or "Monthly"
+                key = (prod_name, ed_name, cycle)
+                if key not in grouped:
+                    grouped[key] = {
+                        "product": prod_name,
+                        "edition": ed_name,
+                        "cycle": cycle,
+                        "inr": None,
+                        "usd": None,
+                        "eur": None,
+                        "gbp": None,
+                        "status": r.Status or "Active",
+                    }
+                cur = (r.Currency or "INR").upper()
+                sym = r.Currency_Symbol or {"INR": "₹", "USD": "$", "EUR": "€", "GBP": "£"}.get(cur, "")
+                val_str = f"{sym}{int(r.Price) if float(r.Price) == int(r.Price) else float(r.Price):,}"
+                if cur == "INR":
+                    grouped[key]["inr"] = val_str
+                elif cur == "USD":
+                    grouped[key]["usd"] = val_str
+                elif cur == "EUR":
+                    grouped[key]["eur"] = val_str
+                elif cur == "GBP":
+                    grouped[key]["gbp"] = val_str
+
+            return HttpResponse(
+                JSONRenderer().render({"status": True, "results": list(grouped.values())}),
+                content_type='application/json',
+                status=200,
+            )
+        except Exception as e:
+            return HttpResponse(JSONRenderer().render({"status": False, "Error": str(e)}), content_type='application/json', status=400)
+
+
+class ProductPricingBulkUpdateAPI(APIView):
+    def post(self, request, *args, **kwargs):
+        try:
+            data = request.data or {}
+            qs = _filter_product_pricing_queryset(data)
+            adj_type = str(data.get("adjustment_type") or "increase_pct").lower()
+            adj_value = Decimal(str(data.get("adjustment_value") or 0))
+            effective_date = data.get("effective_date") or None
+            preview_only = bool(data.get("preview", False))
+
+            if preview_only:
+                return HttpResponse(
+                    JSONRenderer().render({
+                        "status": True,
+                        "affected_count": qs.count(),
+                        "sample_ids": list(qs.values_list("Pricing_Id", flat=True)[:10]),
+                    }),
+                    content_type='application/json',
+                    status=200,
+                )
+
+            updated_count = 0
+            for obj in qs:
+                old_p = Decimal(str(obj.Price or 0))
+                if adj_type in ("increase_pct", "increase by percentage (%)"):
+                    new_p = (old_p * (Decimal("1") + adj_value / Decimal("100"))).quantize(Decimal("0.01"))
+                elif adj_type in ("decrease_pct", "decrease by percentage (%)"):
+                    new_p = max(Decimal("0"), (old_p * (Decimal("1") - adj_value / Decimal("100"))).quantize(Decimal("0.01")))
+                else:
+                    new_p = max(Decimal("0"), (old_p + adj_value).quantize(Decimal("0.01")))
+
+                obj.Price = new_p
+                if effective_date:
+                    obj.Effective_From = effective_date
+                    obj.Status = "Scheduled"
+                obj.Updated_Date = timezone.now()
+                obj.save()
+                _log_product_price_history(
+                    obj, old_p, new_p,
+                    f"Bulk adjustment ({adj_type}: {adj_value})",
+                    getattr(request, 'user', None),
+                    hist_status="Scheduled" if effective_date else "Applied",
+                )
+                updated_count += 1
+
+            return HttpResponse(
+                JSONRenderer().render({
+                    "status": True,
+                    "updated_count": updated_count,
+                    "message": f"Bulk price adjustment applied to {updated_count} pricing rule(s).",
+                }),
+                content_type='application/json',
+                status=200,
+            )
+        except Exception as e:
+            return HttpResponse(JSONRenderer().render({"status": False, "Error": str(e)}), content_type='application/json', status=400)
+
+
+class ProductPricingScheduleAPI(APIView):
+    def post(self, request, *args, **kwargs):
+        try:
+            data = request.data or {}
+            pk = data.get("id")
+            code = data.get("Pricing_Id")
+            obj = ProductPricing.objects.get(id=pk, Is_Deleted=False) if pk else ProductPricing.objects.get(Pricing_Id=code, Is_Deleted=False)
+            old_p = obj.Price
+            raw_price = re.sub(r'[^0-9.]', '', str(data.get("new_price") or obj.Price))
+            new_p = Decimal(raw_price or str(obj.Price))
+            eff_date = data.get("effective_date") or None
+            lead_note = str(data.get("notification_lead") or "Scheduled future price change")
+
+            obj.Price = new_p
+            if eff_date:
+                obj.Effective_From = eff_date
+            obj.Status = "Scheduled"
+            obj.Updated_Date = timezone.now()
+            obj.save()
+
+            _log_product_price_history(obj, old_p, new_p, lead_note, getattr(request, 'user', None), hist_status="Scheduled")
+            return HttpResponse(
+                JSONRenderer().render({"status": True, "message": f"Price revision scheduled for {eff_date}", "data": ProductPricingSerializer(obj).data}),
+                content_type='application/json',
+                status=200,
+            )
+        except ProductPricing.DoesNotExist:
+            return HttpResponse(JSONRenderer().render({"status": False, "Error": "Pricing rule not found"}), content_type='application/json', status=404)
+        except Exception as e:
+            return HttpResponse(JSONRenderer().render({"status": False, "Error": str(e)}), content_type='application/json', status=400)
+
+
+class ProductPriceHistoryAPI(APIView):
+    def get(self, request, *args, **kwargs):
+        try:
+            qs = ProductPriceHistory.objects.filter(Is_Deleted=False).order_by('-Change_Date', '-id')
+            pricing_id = request.query_params.get('Pricing_Id')
+            if pricing_id:
+                qs = qs.filter(Pricing_Id=pricing_id)
+            serialized = ProductPriceHistorySerializer(qs[:100], many=True).data
+            return HttpResponse(
+                JSONRenderer().render({"status": True, "count": len(serialized), "results": serialized}),
+                content_type='application/json',
+                status=200,
+            )
+        except Exception as e:
+            return HttpResponse(JSONRenderer().render({"status": False, "Error": str(e)}), content_type='application/json', status=400)
 
 
 

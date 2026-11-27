@@ -1128,13 +1128,100 @@ class ProductMasterSerializerMixin:
         return ret
 
 
+def _enrich_plan_representation(instance, ret):
+    """Attach normalized pricing, product, feature, and quota fields to serialized Plan data."""
+    ret['PlanDetails'] = instance.Description or ""
+    ret['Addstorage'] = 0
+    ret['Billing_Cycle'] = instance.billing_cycle
+    ret['billing_cycle'] = instance.billing_cycle
+    ret['Tax'] = instance.Tax
+    ret['TaxPercentage'] = instance.TaxPercentage or 0
+    ret['TaxAmount'] = instance.TaxAmount or 0
+    ret['TotalAmount'] = instance.TotalAmount or 0
+    ret['is_limited'] = bool(instance.is_limited)
+    ret['Plan_Code'] = instance.Plan_Id
+
+    effective_unit = float(instance.UnitPrice or 0)
+    effective_month = float(instance.Planmonth_price if instance.Planmonth_price is not None else effective_unit)
+    is_free_type = str(instance.Plantype or '').strip().lower() == 'free'
+    ret['is_free'] = is_free_type or (effective_unit == 0 and effective_month == 0)
+
+    feature_names = []
+    seen_features = set()
+    if isinstance(instance.Plan_price, list):
+        for item in instance.Plan_price:
+            if isinstance(item, dict):
+                fname = str(item.get('feature_name') or item.get('name') or '').strip()
+            else:
+                fname = str(item or '').strip()
+            if fname and fname.lower() not in seen_features:
+                seen_features.add(fname.lower())
+                feature_names.append(fname)
+
+    plan_feature_rows = []
+    try:
+        for pf in instance.plan_features.filter(Is_Deleted=False, Is_Active=True).select_related('Feature_Id'):
+            fname = pf.Feature_Id.Feature_Name if pf.Feature_Id else None
+            if fname and pf.Is_Included and fname.lower() not in seen_features:
+                seen_features.add(fname.lower())
+                feature_names.append(fname)
+            plan_feature_rows.append({
+                'id': pf.id,
+                'PlanFeature_Id': pf.PlanFeature_Id,
+                'Feature_Id': pf.Feature_Id_id,
+                'Feature_Code': pf.Feature_Id.Feature_Code if pf.Feature_Id else None,
+                'Feature_Name': fname,
+                'Is_Included': pf.Is_Included,
+                'Feature_Price': float(pf.Feature_Price or 0),
+            })
+    except Exception:
+        pass
+
+    limit_rows = []
+    try:
+        for lim in instance.plan_limits.filter(Is_Deleted=False, Is_Active=True):
+            limit_rows.append({
+                'id': lim.id,
+                'PlanLimit_Id': lim.PlanLimit_Id,
+                'Limit_Name': lim.Limit_Name,
+                'Limit_Code': lim.Limit_Code,
+                'Limit_Value': float(lim.Limit_Value) if lim.Limit_Value is not None else None,
+                'Unit': lim.Unit,
+                'Is_Unlimited': lim.Is_Unlimited,
+            })
+    except Exception:
+        pass
+
+    ret['features'] = feature_names
+    ret['plan_features'] = plan_feature_rows
+    ret['limits'] = limit_rows
+
+    if instance.Product:
+        ret['Product_id'] = instance.Product.id
+        ret['Product_name'] = instance.Product.Product_Name
+        ret['Product_code'] = instance.Product.Product_Code
+        if isinstance(ret.get('Product'), dict):
+            ret['Product_details'] = ret['Product']
+        ret['Product'] = instance.Product.Product_Name or instance.Product.Product_Code
+    else:
+        ret['Product_id'] = None
+        ret['Product_name'] = None
+        ret['Product_code'] = None
+        ret['Product'] = None
+    return ret
+
+
 class Planserializer(serializers.ModelSerializer):
     product_name = serializers.SerializerMethodField(read_only=True)
     product_code = serializers.SerializerMethodField(read_only=True)
 
     class Meta:
         model = Plan
-        fields = '__all__'
+        exclude = ['Product_Feature']
+        extra_kwargs = {
+            'Plan_Id': {'required': False},
+            'ProductEdition_id': {'required': False, 'allow_null': True},
+        }
 
     def to_internal_value(self, data):
         if hasattr(data, 'dict'):
@@ -1147,6 +1234,24 @@ class Planserializer(serializers.ModelSerializer):
             data['Description'] = data['PlanDetails']
         data.pop('PlanDetails', None)
         data.pop('Addstorage', None)
+
+        # Normalize UI price aliases if sent
+        if 'Monthly_Price' in data and 'Planmonth_price' not in data:
+            data['Planmonth_price'] = data.pop('Monthly_Price')
+        if 'Yearly_Price' in data and 'Planyear_price' not in data:
+            data['Planyear_price'] = data.pop('Yearly_Price')
+        if 'Price' in data and 'UnitPrice' not in data:
+            data['UnitPrice'] = data.pop('Price')
+
+        # Empty-string cleanup for nullable foreign keys & numeric fields
+        for nullable_key in [
+            'ProductEdition_id', 'Product', 'Planmonth_price', 'Planyear_price',
+            'UnitPrice', 'Setupfees', 'No_Of_Users', 'AllocatedStorage',
+            'Noofcontacts', 'Noofmonths', 'Trialperiod', 'Max_Leads', 'Max_account',
+            'TaxPercentage', 'TaxAmount', 'TotalAmount',
+        ]:
+            if nullable_key in data and data[nullable_key] == '':
+                data[nullable_key] = None
 
         # Normalize billing_cycle from either 'billing_cycle' or 'Billing_Cycle'
         bc = data.get('billing_cycle') if 'billing_cycle' in data else data.get('Billing_Cycle')
@@ -1220,13 +1325,22 @@ class Planserializer(serializers.ModelSerializer):
         except (ValueError, TypeError):
             pass
 
-        # Resolve Product (can be PK ID, or string code/name like 'CRM')
+        # Resolve Product (prefer explicit Product_id PK, or resolve string code/name)
+        if 'Product_id' in data and data['Product_id'] is not None and 'Product' not in data:
+            data['Product'] = data.pop('Product_id')
         if 'Product' in data and data['Product']:
             val = data['Product']
             if isinstance(val, str) and not val.isdigit():
-                prod = ProductMaster.objects.filter(
-                    Q(Product_Code__iexact=val) | Q(Product_Name__iexact=val)
-                ).first()
+                prod = (
+                    ProductMaster.objects.filter(Is_Deleted=False)
+                    .filter(Q(Product_Code__iexact=val) | Q(Product_Name__iexact=val))
+                    .order_by('-id')
+                    .first()
+                )
+                if not prod:
+                    prod = ProductMaster.objects.filter(
+                        Q(Product_Code__iexact=val) | Q(Product_Name__iexact=val)
+                    ).order_by('-id').first()
                 if prod:
                     data['Product'] = prod.id
             elif isinstance(val, int) or (isinstance(val, str) and val.isdigit()):
@@ -1238,28 +1352,7 @@ class Planserializer(serializers.ModelSerializer):
 
     def to_representation(self, instance):
         ret = super().to_representation(instance)
-        # Backward compatibility properties
-        ret['PlanDetails'] = instance.Description or ""
-        ret['Addstorage'] = 0
-        ret['Billing_Cycle'] = instance.billing_cycle
-        ret['billing_cycle'] = instance.billing_cycle
-        ret['Tax'] = instance.Tax
-        ret['TaxPercentage'] = instance.TaxPercentage or 0
-        ret['TaxAmount'] = instance.TaxAmount or 0
-        ret['TotalAmount'] = instance.TotalAmount or 0
-        ret['is_limited'] = bool(instance.is_limited)
-
-        if instance.Product:
-            ret['Product_id'] = instance.Product.id
-            ret['Product_name'] = instance.Product.Product_Name
-            ret['Product_code'] = instance.Product.Product_Code
-            ret['Product'] = instance.Product.Product_Name or instance.Product.Product_Code
-        else:
-            ret['Product_id'] = None
-            ret['Product_name'] = None
-            ret['Product_code'] = None
-            ret['Product'] = None
-        return ret
+        return _enrich_plan_representation(instance, ret)
 
     def get_product_name(self, obj):
         return obj.Product.Product_Name if obj.Product else None
@@ -1280,35 +1373,12 @@ class Planserializers(serializers.ModelSerializer):
 
     class Meta:
         model = Plan
-        fields = "__all__"
+        exclude = ['Product_Feature']
         depth = 1
 
     def to_representation(self, instance):
         ret = super().to_representation(instance)
-        # Backward compatibility properties
-        ret['PlanDetails'] = instance.Description or ""
-        ret['Addstorage'] = 0
-        ret['Billing_Cycle'] = instance.billing_cycle
-        ret['billing_cycle'] = instance.billing_cycle
-        ret['Tax'] = instance.Tax
-        ret['TaxPercentage'] = instance.TaxPercentage or 0
-        ret['TaxAmount'] = instance.TaxAmount or 0
-        ret['TotalAmount'] = instance.TotalAmount or 0
-        ret['is_limited'] = bool(instance.is_limited)
-
-        if instance.Product:
-            ret['Product_id'] = instance.Product.id
-            ret['Product_name'] = instance.Product.Product_Name
-            ret['Product_code'] = instance.Product.Product_Code
-            if isinstance(ret.get('Product'), dict):
-                ret['Product_details'] = ret['Product']
-                ret['Product'] = instance.Product.Product_Name or instance.Product.Product_Code
-        else:
-            ret['Product_id'] = None
-            ret['Product_name'] = None
-            ret['Product_code'] = None
-            ret['Product'] = None
-        return ret
+        return _enrich_plan_representation(instance, ret)
 
     def get_product_name(self, obj):
         return obj.Product.Product_Name if obj.Product else None
@@ -2469,6 +2539,96 @@ class AccountSerializerpartners(serializers.ModelSerializer):
         if hasattr(instance, 'Date_Of_Birth') and isinstance(instance.Date_Of_Birth, datetime):
             instance.Date_Of_Birth = instance.Date_Of_Birth.date()
         return super().to_representation(instance)
+
+
+class ProductPricingSerializer(serializers.ModelSerializer):
+    Product_Name = serializers.SerializerMethodField(read_only=True)
+    Product_Code = serializers.SerializerMethodField(read_only=True)
+    Edition_Name = serializers.SerializerMethodField(read_only=True)
+    Plan_Name = serializers.SerializerMethodField(read_only=True)
+    Effective_From = SafeDateField(required=False, allow_null=True)
+    Effective_To = SafeDateField(required=False, allow_null=True)
+
+    class Meta:
+        model = ProductPricing
+        fields = '__all__'
+        extra_kwargs = {
+            'Pricing_Id': {'required': False},
+        }
+
+    def to_internal_value(self, data):
+        if hasattr(data, 'dict'):
+            data = data.dict()
+        elif hasattr(data, 'copy'):
+            data = data.copy()
+
+        # Support UI aliases cleanly
+        if 'Product' in data and 'Product_Id' not in data:
+            data['Product_Id'] = data.pop('Product')
+        if 'Edition' in data and 'Edition_Id' not in data:
+            data['Edition_Id'] = data.pop('Edition')
+        if 'Plan' in data and 'Plan_Id' not in data:
+            data['Plan_Id'] = data.pop('Plan')
+        if 'Unit_Price' in data and 'Price' not in data:
+            data['Price'] = data.pop('Unit_Price')
+
+        for k in ('Edition_Id', 'Plan_Id', 'Category_Id', 'Organization_Id', 'Effective_From', 'Effective_To', 'Tax_Rate'):
+            if k in data and data[k] == '':
+                data[k] = None
+
+        prod_val = data.get('Product_Id')
+        if isinstance(prod_val, str) and not prod_val.isdigit():
+            p = ProductMaster.objects.filter(
+                Q(Product_Name__iexact=prod_val) | Q(Product_Code__iexact=prod_val),
+                Is_Deleted=False,
+            ).order_by('-id').first()
+            if p:
+                data['Product_Id'] = p.id
+
+        plan_val = data.get('Plan_Id')
+        if isinstance(plan_val, str) and not plan_val.isdigit():
+            pl = Plan.objects.filter(
+                Q(Plan_Name__iexact=plan_val) | Q(Plan_Id__iexact=plan_val),
+                Is_Deleted=False,
+            ).order_by('-id').first()
+            if pl:
+                data['Plan_Id'] = pl.id
+            else:
+                data['Plan_Id'] = None
+
+        ed_val = data.get('Edition_Id')
+        if isinstance(ed_val, str) and not ed_val.isdigit():
+            ed = ProductEdition.objects.filter(
+                Q(Edition_Name__iexact=ed_val) | Q(Edition_Code__iexact=ed_val),
+                Is_Deleted=False,
+            ).order_by('-id').first()
+            data['Edition_Id'] = ed.id if ed else None
+
+        return super().to_internal_value(data)
+
+    def get_Product_Name(self, obj):
+        return obj.Product_Id.Product_Name if obj.Product_Id else None
+
+    def get_Product_Code(self, obj):
+        return obj.Product_Id.Product_Code if obj.Product_Id else None
+
+    def get_Edition_Name(self, obj):
+        if obj.Edition_Id:
+            return getattr(obj.Edition_Id, 'Edition_Name', None)
+        app = obj.Applicability if isinstance(obj.Applicability, dict) else {}
+        return app.get('edition_label')
+
+    def get_Plan_Name(self, obj):
+        if obj.Plan_Id:
+            return obj.Plan_Id.Plan_Name
+        app = obj.Applicability if isinstance(obj.Applicability, dict) else {}
+        return app.get('plan_label')
+
+
+class ProductPriceHistorySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ProductPriceHistory
+        fields = '__all__'
 
 
 

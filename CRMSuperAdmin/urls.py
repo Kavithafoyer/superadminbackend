@@ -239,6 +239,10 @@ path('ProductDropdownAPI/',ProductDropdownAPI.as_view()),
 path('ActiveProducts/',ProductDropdownAPI.as_view()),
 
 path('planCRUD/',planCRUD.as_view()),
+path('PlanFilter/', PlanMasterFilterAPI.as_view()),
+path('PlanComparisonMatrix/', PlanComparisonMatrixAPI.as_view()),
+path('PlanComparisonExport/', PlanComparisonExportAPI.as_view()),
+path('PlanPublish/', PlanPublishAPI.as_view()),
 
 path('PlanFeatures/',PlanFeatures.as_view()),
 
@@ -604,4 +608,14 @@ path('ProductEditionListwithPagination/', ProductEditionListwithPagination.as_vi
 path('ProductEditionSearch/', ProductEditionSearch.as_view(), name='product-edition-search'),
 path('ProductEditionlistwithoutpaginaton/', ProductEditionlistwithoutpaginaton.as_view(), name='product-edition-list-without-pagination'),
 path('ProductEditionFilter/', ProductEditionFilter.as_view(), name='product-edition-filter'),
+
+# Product Pricing
+path('ProductPricingCRUD/', ProductPricingCRUD.as_view(), name='product-pricing-crud'),
+path('ProductPricingFilter/', ProductPricingFilterAPI.as_view(), name='product-pricing-filter'),
+path('ProductPricingKPI/', ProductPricingKPIAPI.as_view(), name='product-pricing-kpi'),
+path('ProductPricingExport/', ProductPricingExportAPI.as_view(), name='product-pricing-export'),
+path('ProductPriceMatrix/', ProductPriceMatrixAPI.as_view(), name='product-price-matrix'),
+path('ProductPricingBulkUpdate/', ProductPricingBulkUpdateAPI.as_view(), name='product-pricing-bulk-update'),
+path('ProductPricingSchedule/', ProductPricingScheduleAPI.as_view(), name='product-pricing-schedule'),
+path('ProductPriceHistory/', ProductPriceHistoryAPI.as_view(), name='product-price-history'),
 ]
