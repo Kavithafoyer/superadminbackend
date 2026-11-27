@@ -48,7 +48,7 @@ from django.db import ProgrammingError, transaction
 
 
 from django.db.models import (
-    Q, F, Sum, Max, Count,
+    Q, F, Sum, Max, Count, Prefetch,
     Case, When, IntegerField
 )
 
@@ -1028,7 +1028,40 @@ class PlanLimitFilter(ListAPIView):
 # ========================================== ProductConfiguration =========================================== #
 
 class ProductConfigurationCRUD(APIView):
+    def selected_product(self, code, *, lock=False):
+        products = ProductMaster.objects.filter(Is_Deleted=False)
+        if lock:
+            products = products.select_for_update()
+        return products.get(Product_Code=code)
+
+    def product_configuration(self, product):
+        return ProductConfiguration.objects.filter(Product_Id=product, Is_Deleted=False).order_by('-Version', '-id').first()
+
+    def save_for_product(self, request, *, create):
+        data = request.data.copy()
+        try:
+            with transaction.atomic():
+                product = self.selected_product(data['Product_Code'], lock=True)
+                current = self.product_configuration(product)
+                if create and current is not None:
+                    return Response({'detail': 'This product already has a configuration. Reload it before saving.'}, status=status.HTTP_409_CONFLICT)
+                if not create and current is None:
+                    return Response({'code': 'configuration_not_found', 'detail': 'No configuration exists for this product.'}, status=status.HTTP_404_NOT_FOUND)
+                data['Product_Id'] = product.pk
+                if create:
+                    data['Configuration_Id'] = 'PCF-' + uuid.uuid4().hex
+                else:
+                    data['Configuration_Id'] = current.Configuration_Id
+                serializer = ProductConfigurationSerializer(instance=None if create else current, data=data)
+                serializer.is_valid(raise_exception=True)
+                serializer.save()
+                return Response(serializer.data)
+        except ProductMaster.DoesNotExist:
+            return Response({'detail': 'Product not found.'}, status=status.HTTP_404_NOT_FOUND)
+
     def post(self, request, *args, **kwargs):
+        if 'Product_Code' in request.data:
+            return self.save_for_product(request, create=True)
         try:
             data = request.data
             serialize = ProductConfigurationSerializer(data=data)
@@ -1043,6 +1076,16 @@ class ProductConfigurationCRUD(APIView):
             return HttpResponse(output, content_type="application/json", status=status.HTTP_400_BAD_REQUEST)
 
     def get(self, request, *args, **kwargs):
+        if 'Product_Code' in request.query_params:
+            try:
+                product = self.selected_product(request.query_params['Product_Code'])
+            except ProductMaster.DoesNotExist:
+                return Response({'detail': 'Product not found.'}, status=status.HTTP_404_NOT_FOUND)
+            configuration = self.product_configuration(product)
+            if configuration is None:
+                return Response({'code': 'configuration_not_found', 'detail': 'No configuration exists for this product.'}, status=status.HTTP_404_NOT_FOUND)
+            return Response(ProductConfigurationSerializer(configuration).data)
+
         try:
             data = request.query_params
             config_id = data.get('id')
@@ -1060,6 +1103,8 @@ class ProductConfigurationCRUD(APIView):
             return HttpResponse(output, content_type="application/json", status=status.HTTP_400_BAD_REQUEST)
 
     def put(self, request, *args, **kwargs):
+        if 'Product_Code' in request.data:
+            return self.save_for_product(request, create=False)
         try:
             data = request.data
             config_id = data.get('id')
@@ -1234,7 +1279,7 @@ class ProductEditionCRUD(APIView):
     def get(self, request, *args, **kwargs):
         try:
             data = request.query_params
-            editions = catalog_product_scope(ProductEdition.objects.filter(Is_Deleted=False), data)
+            editions = catalog_product_scope(ProductEdition.objects.select_related('Product_Id__Category_id').filter(Is_Deleted=False), data)
             edition_id = data.get('id')
             if edition_id:
                 module = editions.get(id=edition_id)
@@ -1327,7 +1372,7 @@ class ProductEditionListwithPagination(ListAPIView):
 
     def get_queryset(self):
         params = self.request.query_params
-        qs = catalog_product_scope(ProductEdition.objects.filter(Is_Deleted=False), params)
+        qs = catalog_product_scope(ProductEdition.objects.select_related('Product_Id__Category_id').filter(Is_Deleted=False), params)
         for field in ('Edition_Name', 'Edition_Code'):
             if params.get(field):
                 qs = qs.filter(**{field + '__icontains': params[field]})
@@ -1367,7 +1412,7 @@ class ProductEditionSearch(ListAPIView):
 class ProductEditionlistwithoutpaginaton(APIView):
     def get(self, request, *args, **kwargs):
         try:
-            qs = catalog_product_scope(ProductEdition.objects.filter(Is_Deleted=False), request.query_params)
+            qs = catalog_product_scope(ProductEdition.objects.select_related('Product_Id__Category_id').filter(Is_Deleted=False), request.query_params)
             product = request.query_params.get('product')
             if product and 'Product_Id' not in request.query_params:
                 if product.isascii() and product.isdecimal():
@@ -7562,25 +7607,38 @@ class ModuleMasterCRUD(APIView):
             return HttpResponse(output, content_type="application/json", status=status.HTTP_400_BAD_REQUEST)
 
     def patch(self, request, *args, **kwargs):
+        data = request.data
+        mod_id = data.get('id')
+        module_code = data.get('ModuleMasterId')
+        if not mod_id and not module_code:
+            raise ValidationError({'id': 'id or ModuleMasterId is required for patch.'})
+        assignments = data.get('feature_editions', {})
+        if not isinstance(assignments, dict) or any(not isinstance(ids, list) for ids in assignments.values()):
+            raise ValidationError({'feature_editions': 'Provide edition ID lists keyed by feature ID.'})
+
         try:
-            data = request.data
-            mod_id = data.get('id')
-            if mod_id:
-                module = ModuleMaster.objects.get(id=mod_id)
-            elif data.get('ModuleMasterId'):
-                module = ModuleMaster.objects.get(ModuleMasterId=data.get('ModuleMasterId'))
-            else:
-                raise Exception("id or ModuleMasterId is required for patch")
-            serialize = ModuleMasterSerializer(instance=module, data=data, partial=True)
-            if serialize.is_valid():
-                serialize.save()
-                output = JSONRenderer().render(serialize.data)
-                return HttpResponse(output, content_type="application/json", status=status.HTTP_200_OK)
-            output = JSONRenderer().render(serialize.errors)
-            return HttpResponse(output, content_type="application/json", status=status.HTTP_400_BAD_REQUEST)
-        except Exception as e:
-            output = JSONRenderer().render({"Error": str(e)})
-            return HttpResponse(output, content_type="application/json", status=status.HTTP_400_BAD_REQUEST)
+            with transaction.atomic():
+                modules = catalog_product_scope(
+                    ModuleMaster.objects.select_for_update().filter(Is_Deleted=False), data,
+                )
+                module = modules.get(pk=mod_id) if mod_id else modules.get(ModuleMasterId=module_code)
+                serializer = ModuleMasterSerializer(module, data=data, partial=True)
+                serializer.is_valid(raise_exception=True)
+                module = serializer.save()
+                features = ProductFeature.objects.select_for_update().filter(
+                    Module_Id=module, Product_Id_id=module.Product_Id_id, Is_Deleted=False,
+                )
+                for key, edition_ids in assignments.items():
+                    feature_id = catalog_query_id({'id': key}, 'id')
+                    feature = features.filter(pk=feature_id).first()
+                    if feature is None:
+                        raise ValidationError({'feature_editions': f'Feature {key} does not belong to this module.'})
+                    assignment = ProductFeatureSerializer(feature, data={'Edition_Ids': edition_ids}, partial=True)
+                    assignment.is_valid(raise_exception=True)
+                    feature.Edition_Ids.set(assignment.validated_data['Edition_Ids'])
+                return Response(serializer.data)
+        except ModuleMaster.DoesNotExist:
+            return Response({'detail': 'Module not found.'}, status=status.HTTP_404_NOT_FOUND)
 
     def delete(self, request, *args, **kwargs):
         try:
@@ -7660,10 +7718,21 @@ class ModuleMasterlistwithoutpaginaton(APIView):
                 qs = qs.filter(
                     Product_Edition_id__Product_Id_id=edition_product,
                     Product_Edition_id__Is_Deleted=False,
-                ).distinct().prefetch_related('Product_Edition_id', 'ProductFeature_id')
+                ).distinct()
             elif product:
                 qs = qs.filter(Product__icontains=product)
-            module = qs.order_by('-id')
+            module = qs.select_related('Created_By', 'Updated_By', 'Organization_Id').prefetch_related(
+                'Product_Edition_id', 'ProductFeature_id',
+                Prefetch('submodules', queryset=ModuleMaster.objects.filter(Is_Deleted=False, Is_active=True).order_by('id'),
+                         to_attr='active_catalog_submodules'),
+            ).annotate(
+                catalog_feature_count=Count('owned_features', filter=Q(
+                    owned_features__Is_Deleted=False, owned_features__Product_Id_id=F('Product_Id_id'),
+                ), distinct=True),
+                catalog_edition_count=Count('Product_Edition_id', filter=Q(
+                    Product_Edition_id__Is_Deleted=False, Product_Edition_id__Product_Id_id=F('Product_Id_id'),
+                ), distinct=True),
+            ).order_by('-id')
             serialize = ModuleMasterSerializer(module, many=True)
             output = JSONRenderer().render(serialize.data)
             return HttpResponse(output, content_type='application/json', status=status.HTTP_200_OK)
@@ -12443,6 +12512,10 @@ class GeneratePerformanceInvoice(APIView):
                             "PerformanceInvoice_Id"
                         )
                     )
+
+
+
+                    
                 )
 
                 invoice = PerformanceInvoice.objects.create(
@@ -21325,6 +21398,14 @@ class TrialConfigurationKPIAPI(APIView):
 
 
 
+class ProductMasterdropdownlist(APIView):
+    authentication_classes = []
+    permission_classes = []
+
+    def get(self, request, *args, **kwargs):
+        module = ProductMaster.objects.filter(Is_Deleted=False).order_by('-id')
+        serialize = ProductMasterdropdownlistSerializer(module, many=True)
+        return HttpResponse(JSONRenderer().render(serialize.data), content_type='application/json', status=status.HTTP_200_OK)
 
 
 

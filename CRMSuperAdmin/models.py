@@ -781,24 +781,17 @@ class ProductMaster(models.Model):
 
 
 
-
-
 def ProductEdition_I():
-    last_edition = ProductEdition.objects.order_by('-id').first()
+    Task= ProductEdition.objects.all().order_by('id').last()
+    if not Task:
+        return "PED" + "000000001"
+    Tasking = Task. Edition_Id
+    Taski=int(Tasking[3:])
+    Tas= Taski + 1
+    Configur = "PED" + str(Tas).zfill(9)
+    return Configur
 
-    if not last_edition:
-        return 'PED000000001'
 
-    last_id = last_edition.Edition_Id
-
-    try:
-        last_number = int(last_id.replace('PED', ''))
-    except (ValueError, AttributeError):
-        last_number = 0
-
-    new_number = last_number + 1
-
-    return f'PED{new_number:09d}'
 
 class ProductEdition(models.Model):
 
@@ -899,8 +892,6 @@ class ProductEdition(models.Model):
             self.Edition_Id = ProductEdition_I()
         if not self.Edition_Code:
             self.Edition_Code = self.Edition_Id
-        elif not self.Edition_Id:
-            self.Edition_Id = self.Edition_Code
 
         super().save(*args, **kwargs)
 

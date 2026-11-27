@@ -736,15 +736,15 @@ class ProductConfigurationSerializer(serializers.ModelSerializer):
                     data[json_field] = {}
 
         # Default fallback for Organization_Id, Created_By, Updated_By if missing
-        if not data.get('Organization_Id'):
+        if self.instance is None and not data.get('Organization_Id'):
             first_org = Userorganizationmaster.objects.first()
             if first_org:
                 data['Organization_Id'] = first_org.id
-        if not data.get('Created_By'):
+        if self.instance is None and not data.get('Created_By'):
             first_user = UserAdmin.objects.first()
             if first_user:
                 data['Created_By'] = first_user.id
-        if not data.get('Updated_By'):
+        if self.instance is None and not data.get('Updated_By'):
             data['Updated_By'] = data.get('Created_By')
 
         return super().to_internal_value(data)
@@ -808,21 +808,25 @@ class ProductEditionSerializer(serializers.ModelSerializer):
     product_name = serializers.SerializerMethodField(read_only=True)
     product_code = serializers.SerializerMethodField(read_only=True)
 
+    Category_id = serializers.IntegerField(source='Product_Id.Category_id_id', read_only=True, default=None)
+    Category_Name = serializers.SerializerMethodField()
+
+    def get_Category_Name(self, obj):
+        product = obj.Product_Id
+        if product.Category_id:
+            return product.Category_id.Category_Name
+        return product.Category
+
     class Meta:
         model = ProductEdition
         fields = '__all__'
+        read_only_fields = ('Edition_Id',)
 
     def to_internal_value(self, data):
         if hasattr(data, 'dict'):
             data = data.dict()
         elif hasattr(data, 'copy'):
             data = data.copy()
-
-        # Handle Edition_Id / Edition_Code mapping
-        if 'Edition_Id' in data and not data.get('Edition_Code'):
-            data['Edition_Code'] = data['Edition_Id']
-        elif self.instance is None and 'Edition_Code' in data and not data.get('Edition_Id'):
-            data['Edition_Id'] = data['Edition_Code']
 
         # Product resolution if string or dict
         if 'Product_Id' in data or 'Product' in data or 'product_id' in data:
@@ -909,6 +913,8 @@ class ProductEditionSerializer(serializers.ModelSerializer):
         except Exception:
             pass
         return None
+
+
 
 
 class ProductMasterSerializer(serializers.ModelSerializer):
@@ -2083,9 +2089,13 @@ class ModuleMasterSerializer(serializers.ModelSerializer):
     edition_count = serializers.SerializerMethodField()
 
     def get_feature_count(self, obj):
+        if hasattr(obj, 'catalog_feature_count'):
+            return obj.catalog_feature_count
         return obj.owned_features.filter(Is_Deleted=False, Product_Id_id=obj.Product_Id_id).count()
 
     def get_edition_count(self, obj):
+        if hasattr(obj, 'catalog_edition_count'):
+            return obj.catalog_edition_count
         return obj.Product_Edition_id.filter(Is_Deleted=False, Product_Id_id=obj.Product_Id_id).count()
 
     class Meta:
@@ -2191,6 +2201,8 @@ class ModuleMasterSerializer(serializers.ModelSerializer):
 
     def get_submodules(self, obj):
         try:
+            if hasattr(obj, 'active_catalog_submodules'):
+                return ModuleMasterSerializer(obj.active_catalog_submodules, many=True).data
             if hasattr(obj, 'submodules'):
                 children = obj.submodules.filter(Is_Deleted=False, Is_active=True).order_by('id')
                 return ModuleMasterSerializer(children, many=True).data
@@ -3519,6 +3531,9 @@ class TrialConfigurationSerializer(_LicenseAuditSerializerMixin):
         return f"{days} Days" if days is not None else None
 
 
-
+class ProductMasterdropdownlistSerializer(ProductMasterSerializerMixin, serializers.ModelSerializer):
+    class Meta:
+        model =ProductMaster
+        fields = '__all__'
 
 
