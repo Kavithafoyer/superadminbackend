@@ -280,3 +280,43 @@ class PartnerDealSerializers(serializers.ModelSerializer):
 
 
 
+class PartnerCommissionRuleSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = PartnerCommissionRule
+        fields = '__all__'
+
+
+class PartnerCommissionRuleSerializers(serializers.ModelSerializer):
+    class Meta:
+        model = PartnerCommissionRule
+        fields = '__all__'
+        depth = 1
+
+
+class PartnerCommissionSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = PartnerCommission
+        fields = '__all__'
+
+
+class PartnerCommissionSerializers(serializers.ModelSerializer):
+    class Meta:
+        model = PartnerCommission
+        fields = '__all__'
+        depth = 1
+
+
+class PartnerCommissionInvoiceSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = PartnerCommissionInvoice
+        fields = '__all__'
+
+
+class PartnerCommissionInvoiceSerializers(serializers.ModelSerializer):
+    class Meta:
+        model = PartnerCommissionInvoice
+        fields = '__all__'
+        depth = 1
+
+
+

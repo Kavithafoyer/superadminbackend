@@ -2914,6 +2914,95 @@ def ID(model,serializer,id):
     intid = int(output[id][3:]) + 1
     return str(intid).zfill(9)
 
+# class InvoiceCRUD(APIView):
+
+#     queryset = Invoice.objects.all()
+#     serializer_class = Invoiceserializer
+#     authentication_classes = [JWTAuthentication]
+#     permission_classes = [DjangoModelPermissions]
+
+#     def get(self, request, *args, **kwargs):
+#         try:
+#                 data = request.query_params
+#                 invoice = Invoice.objects.get(id=data['id'])
+#                 return HttpResponse(JSONRenderer().render(Invoiceserializerdepth(invoice).data),
+#                                     content_type='application/json')
+#         except Exception as e:
+#             return HttpResponse(JSONRenderer().render({"Error": str(e)}), content_type='application/json',
+#                                 status=status.HTTP_417_EXPECTATION_FAILED)
+
+#     def post(self, request, *args, **kwargs):
+#         try:
+#             data = request.data
+#             # data['Invoice_Id']=Transaction_Series(data['Organization_Id'],Invoice,"Invoice","Invoice_Id",data['Invoice_Id'])
+#             data['Invoice_Id'] = 'INV' + str(ID(Invoice,Invoiceserializer,'Invoice_Id'))
+#             return requestpost(Invoiceserializer, data=data)
+
+#         except Exception as e:
+#             return HttpResponse(JSONRenderer().render({"Error": str(e)}), content_type='application/json',
+#                                 status=status.HTTP_417_EXPECTATION_FAILED)
+
+#     def put(self, request, *args, **kwargs):
+#         try:
+#             data = request.data
+#             # data = request
+#             return requestput(model=Invoice, serializers=Invoiceserializer, data=data,
+#                               filterdata={"id": data['id']})
+#             # invoicedetails = Invoicedetails.objects.get(Invoice_Detail_Id=data['Invoice_Detail_Id'])
+#             # serializer = Invoicedetailserializer(invoicedetails, data=data)
+#             # if serializer.is_valid():
+#             #     serializer.save()
+#             #     return HttpResponse(JSONRenderer().render(serializer.data), content_type='application/json')
+#             # return HttpResponse(JSONRenderer().render(serializer.errors), status=status.HTTP_400_BAD_REQUEST)
+#         except Exception as e:
+#             return HttpResponse(JSONRenderer().render({"Error": str(e)}), content_type='application/json',
+#                                 status=status.HTTP_417_EXPECTATION_FAILED)
+
+#     def patch(self, request, *args, **kwargs):
+#         try:
+#             data = request.data
+#             # data = request
+#             return requestpatch(model=Invoice, serializers=Invoiceserializer, data=data,
+#                                 filterdata={"id": data['id']})
+#             # invoicedetails = Invoicedetails.objects.get(Invoice_Detail_Id=data['Invoice_Detail_Id'])
+#             # serializer = Invoicedetailserializer(invoicedetails, data=data, partial=True)
+#             # if serializer.is_valid():
+#             #     serializer.save()
+#             #     return HttpResponse(JSONRenderer().render(serializer.data), content_type='application/json')
+#             # return HttpResponse(JSONRenderer().render(serializer.errors), status=status.HTTP_400_BAD_REQUEST)
+#         except Exception as e:
+#             return HttpResponse(JSONRenderer().render({"Error": str(e)}), content_type='application/json',
+#                                 status=status.HTTP_417_EXPECTATION_FAILED)
+
+#     def delete(self, request, *args, **kwargs):
+#         try:
+#             data = request.data
+#             # data = request
+#             # if data == '' or data == {}:
+#             #     raise TypeError("Give the perfect Payload")
+#             return requestpatch(model=Invoice, serializers=Invoiceserializer, data={'Is_Deleted': True},
+#                                 filterdata={"Invoice_Id": data['Invoice_Id']})
+#             # invoicedetails = Invoicedetails.objects.filter(Invoice_Detail_Id=data['Invoice_Detail_Id']).update(
+#             #     Is_Deleted=True)
+#             # if invoicedetails == 0:
+#             #     raise TypeError("please provide vaild Invoice_Detail_Id")
+#             # return HttpResponse(
+#             #     JSONRenderer().render({"message": "Modulepackage " + str(data['Invoice_Detail_Id']) + " is deleted"}),
+#             #     content_type='application/json')
+#         except Exception as e:
+#             return HttpResponse(JSONRenderer().render({"Error": str(e)}), content_type='application/json',
+#                                 status=status.HTTP_417_EXPECTATION_FAILED)
+
+
+# ==================== InvoiceCRUD with Partner Commission ====================
+# Only post() changed. get / put / patch / delete are the same as yours.
+#
+# Add these imports at the top of your invoice views file:
+import json
+from django.db import transaction
+from partner.views import validate_commission_payload, calculate_invoice_commissions   # TODO: your app name
+
+
 class InvoiceCRUD(APIView):
 
     queryset = Invoice.objects.all()
@@ -2936,7 +3025,32 @@ class InvoiceCRUD(APIView):
             data = request.data
             # data['Invoice_Id']=Transaction_Series(data['Organization_Id'],Invoice,"Invoice","Invoice_Id",data['Invoice_Id'])
             data['Invoice_Id'] = 'INV' + str(ID(Invoice,Invoiceserializer,'Invoice_Id'))
-            return requestpost(Invoiceserializer, data=data)
+
+            # ---------- Partner Commission: check BEFORE saving the invoice ----------
+            # Payload keys (only when this invoice has a partner):
+            #   Commission_Partner_Id, Commission_Customer_Id, Commission_InstanceRequest_Id (optional),
+            #   Commission_Items = [{"Commission_Type": "Implementation", "Amount": 100000},
+            #                       {"Commission_Type": "Product", "Product_Id": 3, "Amount": 50000}]
+            commission = None
+            if data.get('Commission_Items'):
+                commission = validate_commission_payload(
+                    data.get('Commission_Partner_Id'),
+                    data.get('Commission_Customer_Id'),
+                    data.get('Commission_Items'),
+                    data.get('Commission_InstanceRequest_Id'),
+                )
+
+            # ---------- Save invoice + commission together ----------
+            with transaction.atomic():
+                response = requestpost(Invoiceserializer, data=data)
+
+                if commission and response.status_code in [200, 201]:
+                    invoice_data = json.loads(response.content)
+                    invoice = Invoice.objects.get(id=invoice_data['id'])
+                    partner, customer, instance_request, items = commission
+                    calculate_invoice_commissions(invoice, partner, customer, items, instance_request, save=True)
+
+            return response
 
         except Exception as e:
             return HttpResponse(JSONRenderer().render({"Error": str(e)}), content_type='application/json',
@@ -2945,15 +3059,8 @@ class InvoiceCRUD(APIView):
     def put(self, request, *args, **kwargs):
         try:
             data = request.data
-            # data = request
             return requestput(model=Invoice, serializers=Invoiceserializer, data=data,
                               filterdata={"id": data['id']})
-            # invoicedetails = Invoicedetails.objects.get(Invoice_Detail_Id=data['Invoice_Detail_Id'])
-            # serializer = Invoicedetailserializer(invoicedetails, data=data)
-            # if serializer.is_valid():
-            #     serializer.save()
-            #     return HttpResponse(JSONRenderer().render(serializer.data), content_type='application/json')
-            # return HttpResponse(JSONRenderer().render(serializer.errors), status=status.HTTP_400_BAD_REQUEST)
         except Exception as e:
             return HttpResponse(JSONRenderer().render({"Error": str(e)}), content_type='application/json',
                                 status=status.HTTP_417_EXPECTATION_FAILED)
@@ -2961,15 +3068,8 @@ class InvoiceCRUD(APIView):
     def patch(self, request, *args, **kwargs):
         try:
             data = request.data
-            # data = request
             return requestpatch(model=Invoice, serializers=Invoiceserializer, data=data,
                                 filterdata={"id": data['id']})
-            # invoicedetails = Invoicedetails.objects.get(Invoice_Detail_Id=data['Invoice_Detail_Id'])
-            # serializer = Invoicedetailserializer(invoicedetails, data=data, partial=True)
-            # if serializer.is_valid():
-            #     serializer.save()
-            #     return HttpResponse(JSONRenderer().render(serializer.data), content_type='application/json')
-            # return HttpResponse(JSONRenderer().render(serializer.errors), status=status.HTTP_400_BAD_REQUEST)
         except Exception as e:
             return HttpResponse(JSONRenderer().render({"Error": str(e)}), content_type='application/json',
                                 status=status.HTTP_417_EXPECTATION_FAILED)
@@ -2977,21 +3077,13 @@ class InvoiceCRUD(APIView):
     def delete(self, request, *args, **kwargs):
         try:
             data = request.data
-            # data = request
-            # if data == '' or data == {}:
-            #     raise TypeError("Give the perfect Payload")
             return requestpatch(model=Invoice, serializers=Invoiceserializer, data={'Is_Deleted': True},
                                 filterdata={"Invoice_Id": data['Invoice_Id']})
-            # invoicedetails = Invoicedetails.objects.filter(Invoice_Detail_Id=data['Invoice_Detail_Id']).update(
-            #     Is_Deleted=True)
-            # if invoicedetails == 0:
-            #     raise TypeError("please provide vaild Invoice_Detail_Id")
-            # return HttpResponse(
-            #     JSONRenderer().render({"message": "Modulepackage " + str(data['Invoice_Detail_Id']) + " is deleted"}),
-            #     content_type='application/json')
         except Exception as e:
             return HttpResponse(JSONRenderer().render({"Error": str(e)}), content_type='application/json',
                                 status=status.HTTP_417_EXPECTATION_FAILED)
+
+
 
 class Invoicemylist(ListAPIView):
     queryset = Invoice.objects.all().order_by('-id')
@@ -14877,7 +14969,7 @@ class AddonCategorySearch(ListAPIView):
             module = AddonCategory.objects.filter(
                 (
                     Q(Category_Name__icontains=data) |
-                    Q(Status__icontains=data)                                                  
+                    Q(Status__icontains=data)
                 ) & Q(Is_Deleted=False)
             )
             return module
@@ -14902,7 +14994,7 @@ class AddonCategoryFilter(ListAPIView):
         try:
             data=request.data
             filter_data={"Is_Deleted":False}
-        
+
             if data.get("Status"):
                 filter_data["Status__icontains"]=data.get("Status")
 
@@ -15115,11 +15207,17 @@ class AddonProductCompatibilityListwithPagination(ListAPIView):
 
 class AddonProductCompatibilitySearch(AddonProductCompatibilityListwithPagination):
     def get_queryset(self):
-        term = self.request.query_params.get('search', '').strip()
-        return super().get_queryset().filter(
-            Q(Addon__Addon_Name__icontains=term) | Q(Product__Product_Name__icontains=term) |
-            Q(Addon_Name__icontains=term) | Q(Product_Name__icontains=term)
-        )
+        try:
+            data = self.request.GET.get('search')
+            module = AddonProductCompatibility.objects.filter(
+                (
+                    Q(Addon_Name__icontains=data) |
+                    Q(Product_Name__icontains=data)                                                                    
+                ) & Q(Is_Deleted=False)
+            )
+            return module
+        except Exception as e:
+            raise Exception(f"Error while fetching Expense: {str(e)}")
 
 
 class AddonProductCompatibilitylistwithoutpaginaton(APIView):
@@ -15129,20 +15227,27 @@ class AddonProductCompatibilitylistwithoutpaginaton(APIView):
         return Response(AddonProductCompatibilitySerializer(compatibility_rules(), many=True).data)
 
 
-class AddonProductCompatibilityFilter(AddonProductCompatibilityListwithPagination):
-    def post(self, request, *args, **kwargs):
-        data = request.data
-        filters = {'Is_Deleted': False, 'Addon__Is_Deleted': False, 'Product__Is_Deleted': False}
-        for field in ('Created_By', 'Addon', 'Product'):
-            if data.get(field):
-                filters[field] = data[field]
-        if data.get('fromdate') and data.get('todate'):
-            filters['Created_Date__range'] = [data['fromdate'], data['todate']]
-        return requestget(model=AddonProductCompatibility, serializer=AddonProductCompatibilitySerializer,
-                          data=filters, page=data.get('page', 1), Operator='and')
+class AddonProductCompatibilityFilter(ListAPIView):
+    queryset=AddonProductCompatibility.objects.all()
+    serializer_class=AddonProductCompatibilitySerializer
+
+    def post(self,request,*args,**kwargs):
+        try:
+            data=request.data
+            filter_data={"Is_Deleted":False}
+        
+            if data.get("Created_By"):
+                filter_data["Created_By"]=data.get("Created_By")
+            if data.get("fromdate") and data.get("todate"):
+                filter_data["Created_Date__date__range"]=[data.get("fromdate"),data.get("todate")]
+
+            return requestget(model=AddonProductCompatibility,serializer=AddonProductCompatibilitySerializer,data=filter_data,page=data.get("page",1),Operator='and')
+
+        except Exception as e:
+            return HttpResponse(JSONRenderer().render({"Error":str(e)}),content_type='application/json',status=status.HTTP_400_BAD_REQUEST)
 
 
-# Add on Price Template 
+# Add on Price Template
 
 
 class AddonPriceTemplateCRUD(APIView):
@@ -15269,8 +15374,7 @@ class AddonPriceTemplateSearch(ListAPIView):
                     Q(Template_Code__icontains=data) |
                     Q(Template_Name__icontains=data) |
                     Q(Billing_Cycle__icontains=data) |
-                    Q(Billing_Type__icontains=data) |
-                    Q(Currency__icontains=data)
+                    Q(Billing_Type__icontains=data)                                                                    
                 ) & Q(Is_Deleted=False)
             ).order_by('-id')
             return module
@@ -15291,45 +15395,17 @@ class AddonPriceTemplatelistwithoutpaginaton(APIView):
         return HttpResponse(output, content_type='application/json', status=status.HTTP_200_OK)
 
 
-class AddonPriceTemplateFilter(APIView):
-    def get(self, request, *args, **kwargs):
-        return self._filter(request.query_params)
+class AddonPriceTemplateFilter(ListAPIView):
+    queryset=AddonPriceTemplate.objects.all()
+    serializer_class=AddonPriceTemplateSerializer
 
-    def post(self, request, *args, **kwargs):
-        return self._filter(request.data)
-
-    def _filter(self, data):
+    def post(self,request,*args,**kwargs):
         try:
-            module = AddonPriceTemplate.objects.filter(Is_Deleted=False)
-            
-            b_type = data.get("Billing_Type") or data.get("type")
-            if b_type and b_type != "All Types":
-                module = module.filter(Billing_Type__iexact=b_type)
-
-            b_cycle = data.get("Billing_Cycle") or data.get("cycle")
-            if b_cycle and b_cycle != "All Cycles":
-                module = module.filter(Billing_Cycle__iexact=b_cycle)
-
-            b_status = data.get("Status") or data.get("status")
-            if b_status and b_status != "All Status":
-                if b_status.lower() == "active":
-                    module = module.filter(Is_Active=True)
-                elif b_status.lower() in ["inactive", "draft"]:
-                    module = module.filter(Is_Active=False)
-
-            if data.get("Is_Active") is not None:
-                val = str(data.get("Is_Active")).lower() in ['true', '1']
-                module = module.filter(Is_Active=val)
-
-            if data.get("search"):
-                q_text = str(data.get("search")).strip()
-                module = module.filter(
-                    Q(Template_Code__icontains=q_text) |
-                    Q(Template_Name__icontains=q_text) |
-                    Q(Billing_Cycle__icontains=q_text) |
-                    Q(Billing_Type__icontains=q_text)
-                )
-
+            data=request.data
+            filter_data={"Is_Deleted":False}
+        
+            if data.get("Created_By"):
+                filter_data["Created_By"]=data.get("Created_By")
             if data.get("fromdate") and data.get("todate"):
                 module = module.filter(Created_Date__range=[data.get("fromdate"), data.get("todate")])
 
@@ -15601,12 +15677,7 @@ class AddonPricingSearch(ListAPIView):
             return AddonPricing.objects.filter(
                 (
                     Q(Addon_Name__icontains=data) |
-                    Q(Price_Template_Name__icontains=data) |
-                    Q(AddonPricing_Id__icontains=data) |
-                    Q(Addon__AddonMaster_Id__icontains=data) |
-                    Q(Addon__Category__icontains=data) |
-                    Q(Price_Template__Template_Code__icontains=data) |
-                    Q(Price_Template__Billing_Type__icontains=data)
+                    Q(Price_Template_Name__icontains=data)                                                                                   
                 ) & Q(Is_Deleted=False)
             ).order_by('-id')
         except Exception as e:
@@ -15627,58 +15698,17 @@ class AddonPricinglistwithoutpaginaton(APIView):
         return HttpResponse(output, content_type='application/json', status=status.HTTP_200_OK)
 
 
-class AddonPricingFilter(APIView):
-    authentication_classes = []
-    permission_classes = []
+class AddonPricingFilter(ListAPIView):
+    queryset=AddonPricing.objects.all()
+    serializer_class=AddonPricingSerializer
 
-    def get(self, request, *args, **kwargs):
-        return self._filter(request.query_params)
-
-    def post(self, request, *args, **kwargs):
-        return self._filter(request.data)
-
-    def _filter(self, data):
+    def post(self,request,*args,**kwargs):
         try:
-            module = AddonPricing.objects.filter(Is_Deleted=False)
-
-            cat = data.get("category") or data.get("Category")
-            if cat and cat != "All Categories":
-                module = module.filter(Addon__Category__iexact=cat)
-
-            model_type = data.get("pricing_model") or data.get("model") or data.get("Pricing_Model")
-            if model_type and model_type != "All Models":
-                if model_type.lower() in ["fixed", "fixed rates"]:
-                    module = module.filter(Price_Template__Billing_Type__in=["Subscription", "Fixed", "Flat"])
-                elif model_type.lower() in ["tiered", "tiered rates"]:
-                    module = module.filter(Price_Template__Billing_Type__in=["Hybrid", "Tiered"])
-                elif model_type.lower() in ["usage", "usage based"]:
-                    module = module.filter(Price_Template__Billing_Type__icontains="Usage")
-                else:
-                    module = module.filter(
-                        Q(Price_Template__Billing_Type__icontains=model_type) |
-                        Q(Addon__License_Model__icontains=model_type)
-                    )
-
-            st = data.get("status") or data.get("Status")
-            if st and st != "All Status":
-                if st.lower() == "active":
-                    module = module.filter(Is_Active=True)
-                elif st.lower() in ["inactive", "draft"]:
-                    module = module.filter(Is_Active=False)
-
-            if data.get("Is_Active") is not None:
-                val = str(data.get("Is_Active")).lower() in ['true', '1']
-                module = module.filter(Is_Active=val)
-
-            if data.get("search") or data.get("q"):
-                q_text = str(data.get("search") or data.get("q")).strip()
-                module = module.filter(
-                    Q(Addon_Name__icontains=q_text) |
-                    Q(Price_Template_Name__icontains=q_text) |
-                    Q(AddonPricing_Id__icontains=q_text) |
-                    Q(Addon__AddonMaster_Id__icontains=q_text)
-                )
-
+            data=request.data
+            filter_data={"Is_Deleted":False}
+        
+            if data.get("Created_By"):
+                filter_data["Created_By"]=data.get("Created_By")
             if data.get("fromdate") and data.get("todate"):
                 module = module.filter(Created_Date__range=[data.get("fromdate"), data.get("todate")])
 
@@ -15972,59 +16002,18 @@ class AddonTieredPricingSearch(ListAPIView):
     queryset = AddonTieredPricing.objects.all()
     serializer_class = AddonTieredPricingSerializer
 
-    def get_queryset(self):
+    def post(self,request,*args,**kwargs):
         try:
-            q = (
-                self.request.GET.get('search')
-                or self.request.GET.get('q')
-                or (hasattr(self.request, 'data') and (self.request.data.get('search') or self.request.data.get('q')))
-                or ''
-            )
-            q = str(q).strip()
-            if not q:
-                return AddonTieredPricing.objects.filter(Is_Deleted=False).order_by('-id')
-            return AddonTieredPricing.objects.filter(
-                (
-                    Q(Addon_Pricing__Addon_Name__icontains=q) |
-                    Q(AddonTieredPricing_Id__icontains=q) |
-                    Q(Addon_Pricing__Addon__Category__icontains=q)
-                ) & Q(Is_Deleted=False)
-            ).order_by('-id')
-        except Exception as e:
-            raise Exception(f"Error while searching AddonTieredPricing: {str(e)}")
+            data=request.data
+            filter_data={"Is_Deleted":False}
+        
+            if data.get("Created_By"):
+                filter_data["Created_By"]=data.get("Created_By")
+            if data.get("fromdate") and data.get("todate"):
+                filter_data["Created_Date__date__range"]=[data.get("fromdate"),data.get("todate")]
 
-    def post(self, request, *args, **kwargs):
-        return self.list(request, *args, **kwargs)
+            return requestget(model=AddonTieredPricing,serializer=AddonTieredPricingSerializer,data=filter_data,page=data.get("page",1),Operator='and')
 
-
-class AddonTieredPricingFilter(APIView):
-    authentication_classes = []
-    permission_classes = []
-
-    def get(self, request, *args, **kwargs):
-        return self._filter(request.query_params)
-
-    def post(self, request, *args, **kwargs):
-        return self._filter(request.data)
-
-    def _filter(self, data):
-        try:
-            module = AddonTieredPricing.objects.filter(Is_Deleted=False)
-            pricing_id = data.get("Addon_Pricing") or data.get("pricing_id")
-            if pricing_id:
-                module = module.filter(Addon_Pricing_id=pricing_id)
-            status_val = data.get("status")
-            if status_val and status_val != "All Status":
-                if status_val.lower() == "active":
-                    module = module.filter(Is_Active=True)
-                elif status_val.lower() in ["draft", "inactive"]:
-                    module = module.filter(Is_Active=False)
-            q = data.get("search") or data.get("q")
-            if q:
-                q = str(q).strip()
-                module = module.filter(Addon_Pricing__Addon_Name__icontains=q)
-            serialize = AddonTieredPricingSerializer(module.order_by('-id'), many=True)
-            return HttpResponse(JSONRenderer().render(serialize.data), content_type='application/json', status=status.HTTP_200_OK)
         except Exception as e:
             return HttpResponse(JSONRenderer().render({"Error": str(e)}), content_type='application/json', status=status.HTTP_400_BAD_REQUEST)
 
@@ -16266,61 +16255,13 @@ class AddonDiscountCouponSearch(ListAPIView):
     queryset = AddonDiscountCoupon.objects.all()
     serializer_class = AddonDiscountCouponSerializer
 
-    def get_queryset(self):
+    def post(self,request,*args,**kwargs):
         try:
-            q = (
-                self.request.GET.get('search')
-                or self.request.GET.get('q')
-                or (hasattr(self.request, 'data') and (self.request.data.get('search') or self.request.data.get('q')))
-                or ''
-            )
-            q = str(q).strip()
-            if not q:
-                return AddonDiscountCoupon.objects.filter(Is_Deleted=False).order_by('-id')
-            return AddonDiscountCoupon.objects.filter(
-                (
-                    Q(Coupon_Code__icontains=q) |
-                    Q(Discount_Type__icontains=q) |
-                    Q(Applicable_Addons__Addon_Name__icontains=q)
-                ) & Q(Is_Deleted=False)
-            ).distinct().order_by('-id')
-        except Exception as e:
-            raise Exception(f"Error while searching AddonDiscountCoupon: {str(e)}")
-
-    def post(self, request, *args, **kwargs):
-        return self.list(request, *args, **kwargs)
-
-
-class AddonDiscountCouponFilter(APIView):
-    authentication_classes = []
-    permission_classes = []
-
-    def get(self, request, *args, **kwargs):
-        return self._filter(request.query_params)
-
-    def post(self, request, *args, **kwargs):
-        return self._filter(request.data)
-
-    def _filter(self, data):
-        try:
-            module = AddonDiscountCoupon.objects.filter(Is_Deleted=False)
-
-            dtype = data.get("type") or data.get("Discount_Type")
-            if dtype and dtype != "All Types":
-                module = module.filter(Discount_Type__icontains=dtype)
-
-            st = data.get("status")
-            if st and st != "All Status":
-                if st.lower() == "active":
-                    module = module.filter(Is_Active=True)
-                elif st.lower() in ["draft", "inactive"]:
-                    module = module.filter(Is_Active=False)
-
-            q = data.get("search") or data.get("q")
-            if q:
-                q = str(q).strip()
-                module = module.filter(Q(Coupon_Code__icontains=q) | Q(Discount_Type__icontains=q))
-
+            data=request.data
+            filter_data={"Is_Deleted":False}
+        
+            if data.get("Created_By"):
+                filter_data["Created_By"]=data.get("Created_By")
             if data.get("fromdate") and data.get("todate"):
                 module = module.filter(Created_Date__date__range=[data.get("fromdate"), data.get("todate")])
 
@@ -16626,22 +16567,16 @@ class AddonPriceHistoryKPIAPI(APIView):
 
     def get(self, request, *args, **kwargs):
         try:
-            qs = AddonPriceHistory.objects.filter(Is_Deleted=False)
-            total_records = qs.count()
+            data=request.data
+            filter_data={"Is_Deleted":False}
+        
+            if data.get("Changed_By"):
+                filter_data["Changed_By"]=data.get("Changed_By")
+            if data.get("fromdate") and data.get("todate"):
+                filter_data["Change_Date__date__range"]=[data.get("fromdate"),data.get("todate")]
 
-            increases = qs.filter(New_Base_Price__gt=models.F('Old_Base_Price')).count()
-            decreases = qs.filter(New_Base_Price__lt=models.F('Old_Base_Price')).count()
+            return requestget(model=AddonPriceHistory,serializer=AddonPriceHistorySerializer,data=filter_data,page=data.get("page",1),Operator='and')
 
-            latest = qs.order_by('-Change_Date').first()
-            last_change = latest.Change_Date.strftime('%d %b %Y') if (latest and latest.Change_Date) else "05 Nov 2026"
-
-            data = {
-                "total_price_changes": total_records or 131,
-                "price_increases": increases or 72,
-                "price_decreases": decreases or 38,
-                "last_change": last_change,
-            }
-            return HttpResponse(JSONRenderer().render(data), content_type="application/json", status=status.HTTP_200_OK)
         except Exception as e:
             return HttpResponse(JSONRenderer().render({"Error": str(e)}), content_type="application/json", status=status.HTTP_400_BAD_REQUEST)
 

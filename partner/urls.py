@@ -247,5 +247,37 @@ urlpatterns = [
         PartnerMailConfigurationTestConnection.as_view(),
         name='PartnerMailConfigurationTestConnection'
     ),
+
+    # ==================== PARTNER COMMISSION URLS ====================
+
+    # ---------- Partner Commission Rule ----------
+    path('PartnerCommissionRuleCRUD/', PartnerCommissionRuleCRUD.as_view()),
+    path('PartnerCommissionRuleSearch/', PartnerCommissionRuleSearch.as_view()),
+    path('PartnerCommissionRuleFilter/', PartnerCommissionRuleFilter.as_view()),
+    path('PartnerCommissionRuleList/', PartnerCommissionRuleList.as_view()),
+    path('PartnerCommissionRulewithoutpagination/', PartnerCommissionRulewithoutpagination.as_view()),
+
+    # ---------- Partner Commission ----------
+    path('PartnerCommissionCRUD/', PartnerCommissionCRUD.as_view()),
+    path('PartnerCommissionSearch/', PartnerCommissionSearch.as_view()),
+    path('PartnerCommissionFilter/', PartnerCommissionFilter.as_view()),
+    path('PartnerCommissionList/', PartnerCommissionList.as_view()),
+    path('PartnerCommissionwithoutpagination/', PartnerCommissionwithoutpagination.as_view()),
+    path('PartnerCommissionDashboard/', PartnerCommissionDashboard.as_view()),
+    path('PartnerCommissionCalculate/', PartnerCommissionCalculate.as_view()),
+    path('PartnerCommissionEligibleForInvoice/', PartnerCommissionEligibleForInvoice.as_view()),
+
+    # ---------- Partner Commission Invoice --------
+    path('PartnerCommissionInvoiceCRUD/', PartnerCommissionInvoiceCRUD.as_view()),
+    path('PartnerCommissionInvoiceSearch/', PartnerCommissionInvoiceSearch.as_view()),
+    path('PartnerCommissionInvoiceFilter/', PartnerCommissionInvoiceFilter.as_view()),
+    path('PartnerCommissionInvoiceList/', PartnerCommissionInvoiceList.as_view()),
+    path('PartnerCommissionInvoicewithoutpagination/', PartnerCommissionInvoicewithoutpagination.as_view()),
+    path('PartnerCommissionInvoiceApproval/', PartnerCommissionInvoiceApproval.as_view()),
+    path('PartnerCommissionInvoicePayment/', PartnerCommissionInvoicePayment.as_view()),
+
+
+
+
 ]
 
