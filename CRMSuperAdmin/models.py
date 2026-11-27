@@ -2933,4 +2933,337 @@ class TrialConfiguration(models.Model):
         return self.Trial_Plan_Name or self.Trial_Id or ''
 
 
+# ==========================================
+# Purchase & Activation Models
+# ==========================================
+
+def PurchaseActivation_I():
+    import re
+    last_obj = PurchaseActivation.objects.order_by('-id').first()
+    if not last_obj or not last_obj.Purchase_Id:
+        return 'PUR-100001'
+    digits = re.findall(r'\d+', str(last_obj.Purchase_Id))
+    next_num = (int(digits[-1]) + 1) if digits else (100000 + last_obj.id + 1)
+    return f"PUR-{next_num}"
+
+
+class PurchaseActivation(models.Model):
+    Purchase_Id = models.CharField(max_length=50, unique=True, default=PurchaseActivation_I)
+    Purchase_Code = models.CharField(max_length=100, blank=True, null=True)
+    Organization_Id = models.ForeignKey(Userorganizationmaster, on_delete=models.CASCADE, blank=True, null=True)
+    Customer_Id = models.ForeignKey('Account', on_delete=models.CASCADE, blank=True, null=True, related_name='purchase_activations')
+    Customer_Name = models.CharField(max_length=250, blank=True, null=True)
+    Product_Id = models.ForeignKey('ProductMaster', on_delete=models.CASCADE, blank=True, null=True, related_name='purchase_activations')
+    Product_Name = models.CharField(max_length=250, blank=True, null=True)
+    Plan_Id = models.ForeignKey('Plan', on_delete=models.SET_NULL, blank=True, null=True, related_name='purchase_activations')
+    Edition_Id = models.ForeignKey('ProductEdition', on_delete=models.SET_NULL, blank=True, null=True, related_name='purchase_activations')
+    Plan_Edition_Name = models.CharField(max_length=150, blank=True, null=True)
+    Purchase_Channel = models.CharField(max_length=100, default='Direct', blank=True, null=True)
+    Partner_Id = models.ForeignKey('partner.Partner', on_delete=models.SET_NULL, blank=True, null=True, related_name='purchase_activations')
+    Purchase_Date = models.DateField(default=timezone.localdate, blank=True, null=True)
+    Amount = models.DecimalField(max_digits=12, decimal_places=2, default=0, blank=True, null=True)
+    Currency = models.CharField(max_length=10, default='INR', blank=True, null=True)
+    Currency_Symbol = models.CharField(max_length=10, default='₹', blank=True, null=True)
+    Payment_Status = models.CharField(max_length=50, default='Pending', blank=True, null=True)
+    Activation_Status = models.CharField(max_length=50, default='Pending', blank=True, null=True)
+    Activation_Date = models.DateTimeField(blank=True, null=True)
+    License_Id = models.ForeignKey('LicenseMaster', on_delete=models.SET_NULL, blank=True, null=True, related_name='purchase_activations')
+    Subscription_Id = models.ForeignKey('Subscriptions', on_delete=models.SET_NULL, blank=True, null=True, related_name='purchase_activations')
+    Payment_Id = models.ForeignKey('Payments', on_delete=models.SET_NULL, blank=True, null=True, related_name='purchase_activations')
+    Invoice_Id = models.ForeignKey('Invoice', on_delete=models.SET_NULL, blank=True, null=True, related_name='purchase_activations')
+    License_Valid_From = models.DateField(blank=True, null=True)
+    License_Valid_To = models.DateField(blank=True, null=True)
+    Entitled_Users = models.IntegerField(default=0, blank=True, null=True)
+    Assigned_Users = models.IntegerField(default=0, blank=True, null=True)
+    Addons_Count = models.IntegerField(default=0, blank=True, null=True)
+    Allocated_Addons = models.ManyToManyField('AddonMaster', blank=True, related_name='purchase_activations')
+    Activation_Timeline = models.JSONField(default=list, blank=True, null=True)
+    Failure_Reason = models.TextField(blank=True, null=True)
+    Notes = models.TextField(blank=True, null=True)
+    Is_Active = models.BooleanField(default=True, blank=True, null=True)
+    Is_Deleted = models.BooleanField(default=False, blank=True, null=True)
+    Created_By = models.ForeignKey(UserAdmin, on_delete=models.CASCADE, related_name='created_purchase_activation_set', blank=True, null=True)
+    Created_Date = models.DateTimeField(default=timezone.now, blank=True, null=True)
+    Updated_By = models.ForeignKey(UserAdmin, on_delete=models.CASCADE, related_name='updated_purchase_activation_set', blank=True, null=True)
+    Updated_Date = models.DateTimeField(default=timezone.now, blank=True, null=True)
+
+    class Meta:
+        db_table = 'PurchaseActivation'
+        ordering = ['-id']
+
+    def build_default_timeline(self):
+        now_iso = timezone.now().isoformat()
+        act_ts = self.Activation_Date.isoformat() if self.Activation_Date else now_iso
+        pay_lower = (self.Payment_Status or '').lower()
+        act_lower = (self.Activation_Status or '').lower()
+        timeline = [
+            {
+                'step': 'Purchase Received',
+                'status': 'completed',
+                'timestamp': (self.Created_Date.isoformat() if self.Created_Date else now_iso),
+            }
+        ]
+        if pay_lower == 'paid':
+            timeline.append({'step': 'Payment Confirmed', 'status': 'completed', 'timestamp': now_iso})
+        elif pay_lower == 'failed':
+            timeline.append({'step': 'Payment Failed', 'status': 'failed', 'timestamp': now_iso})
+        else:
+            timeline.append({'step': 'Payment Pending', 'status': 'pending', 'timestamp': now_iso})
+
+        if act_lower == 'activated':
+            timeline.append({'step': 'License Provisioned', 'status': 'completed', 'timestamp': act_ts})
+            if self.Addons_Count:
+                timeline.append({'step': f'Add-ons Activated ({self.Addons_Count})', 'status': 'completed', 'timestamp': act_ts})
+            timeline.append({'step': 'Activation Completed', 'status': 'completed', 'timestamp': act_ts})
+        elif act_lower == 'failed':
+            timeline.append({'step': 'Activation Failed', 'status': 'failed', 'timestamp': now_iso})
+        else:
+            timeline.append({'step': 'Awaiting Activation', 'status': 'pending', 'timestamp': now_iso})
+        return timeline
+
+    def save(self, *args, **kwargs):
+        if not self.Purchase_Id:
+            self.Purchase_Id = PurchaseActivation_I()
+        if not self.Purchase_Code:
+            self.Purchase_Code = self.Purchase_Id
+        if self.Customer_Id and not self.Customer_Name:
+            self.Customer_Name = (
+                getattr(self.Customer_Id, 'Organization_Name', None)
+                or getattr(self.Customer_Id, 'Contact_Name', None)
+            )
+        if self.Product_Id and not self.Product_Name:
+            self.Product_Name = getattr(self.Product_Id, 'Product_Name', None)
+        if not self.Plan_Edition_Name:
+            if self.Edition_Id and getattr(self.Edition_Id, 'Edition_Name', None):
+                self.Plan_Edition_Name = self.Edition_Id.Edition_Name
+            elif self.Plan_Id and getattr(self.Plan_Id, 'Plan_Name', None):
+                self.Plan_Edition_Name = self.Plan_Id.Plan_Name
+        if (self.Activation_Status or '').lower() == 'activated' and not self.Activation_Date:
+            self.Activation_Date = timezone.now()
+        if (self.Activation_Status or '').lower() in ('failed', 'cancelled'):
+            self.Is_Active = False
+        elif (self.Activation_Status or '').lower() in ('activated', 'pending', 'in progress'):
+            self.Is_Active = True
+        if not self.Activation_Timeline:
+            self.Activation_Timeline = self.build_default_timeline()
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return self.Purchase_Id or ''
+
+
+# ==========================================
+# Activations & Activation Queue Models
+# ==========================================
+
+def ActivationRecord_I():
+    import re
+    last_obj = ActivationRecord.objects.order_by('-id').first()
+    if not last_obj or not last_obj.Activation_Id:
+        return 'ACT-100001'
+    digits = re.findall(r'\d+', str(last_obj.Activation_Id))
+    next_num = (int(digits[-1]) + 1) if digits else (100000 + last_obj.id + 1)
+    return f"ACT-{next_num}"
+
+
+def ActivationQueueRequest_I():
+    import re
+    last_obj = ActivationQueueRequest.objects.order_by('-id').first()
+    if not last_obj or not last_obj.Request_Id:
+        return 'AQ-100001'
+    digits = re.findall(r'\d+', str(last_obj.Request_Id))
+    next_num = (int(digits[-1]) + 1) if digits else (100000 + last_obj.id + 1)
+    return f"AQ-{next_num}"
+
+
+class ActivationRecord(models.Model):
+    Activation_Id = models.CharField(max_length=50, unique=True, default=ActivationRecord_I)
+    Activation_Code = models.CharField(max_length=100, blank=True, null=True)
+    Organization_Id = models.ForeignKey(Userorganizationmaster, on_delete=models.CASCADE, blank=True, null=True)
+    Purchase_Id = models.ForeignKey(PurchaseActivation, on_delete=models.SET_NULL, blank=True, null=True, related_name='activation_records')
+    Customer_Id = models.ForeignKey('Account', on_delete=models.CASCADE, blank=True, null=True, related_name='activation_records')
+    Customer_Name = models.CharField(max_length=250, blank=True, null=True)
+    Product_Id = models.ForeignKey('ProductMaster', on_delete=models.CASCADE, blank=True, null=True, related_name='activation_records')
+    Product_Name = models.CharField(max_length=250, blank=True, null=True)
+    Plan_Id = models.ForeignKey('Plan', on_delete=models.SET_NULL, blank=True, null=True, related_name='activation_records')
+    Edition_Id = models.ForeignKey('ProductEdition', on_delete=models.SET_NULL, blank=True, null=True, related_name='activation_records')
+    Plan_Edition_Name = models.CharField(max_length=150, blank=True, null=True)
+    License_Id = models.ForeignKey('LicenseMaster', on_delete=models.SET_NULL, blank=True, null=True, related_name='activation_records')
+    License_Key = models.CharField(max_length=120, blank=True, null=True)
+    Subscription_Id = models.ForeignKey('Subscriptions', on_delete=models.SET_NULL, blank=True, null=True, related_name='activation_records')
+    Activated_On = models.DateTimeField(default=timezone.now, blank=True, null=True)
+    Valid_From = models.DateField(default=timezone.localdate, blank=True, null=True)
+    Valid_To = models.DateField(blank=True, null=True)
+    Renewal_Count = models.IntegerField(default=0, blank=True, null=True)
+    Entitled_Users = models.IntegerField(default=0, blank=True, null=True)
+    Assigned_Users = models.IntegerField(default=0, blank=True, null=True)
+    Storage_Limit_GB = models.DecimalField(max_digits=10, decimal_places=2, default=0, blank=True, null=True)
+    Core_Modules = models.CharField(max_length=500, blank=True, null=True)
+    Addons_Names = models.CharField(max_length=500, blank=True, null=True)
+    Addons_Count = models.IntegerField(default=0, blank=True, null=True)
+    Allocated_Addons = models.ManyToManyField('AddonMaster', blank=True, related_name='activation_records')
+    Entitlements_Summary = models.JSONField(default=dict, blank=True, null=True)
+    Activation_Timeline = models.JSONField(default=list, blank=True, null=True)
+    Status = models.CharField(max_length=50, default='Active', blank=True, null=True)
+    Failure_Reason = models.TextField(blank=True, null=True)
+    Notes = models.TextField(blank=True, null=True)
+    Is_Active = models.BooleanField(default=True, blank=True, null=True)
+    Is_Deleted = models.BooleanField(default=False, blank=True, null=True)
+    Created_By = models.ForeignKey(UserAdmin, on_delete=models.CASCADE, related_name='created_activation_record_set', blank=True, null=True)
+    Created_Date = models.DateTimeField(default=timezone.now, blank=True, null=True)
+    Updated_By = models.ForeignKey(UserAdmin, on_delete=models.CASCADE, related_name='updated_activation_record_set', blank=True, null=True)
+    Updated_Date = models.DateTimeField(default=timezone.now, blank=True, null=True)
+
+    class Meta:
+        db_table = 'ActivationRecord'
+        ordering = ['-id']
+
+    def build_default_timeline(self):
+        act_ts = self.Activated_On.isoformat() if self.Activated_On else timezone.now().isoformat()
+        status_lower = (self.Status or '').lower()
+        if status_lower == 'failed':
+            return [
+                {'step': 'Purchase Completed', 'status': 'completed', 'timestamp': act_ts},
+                {'step': 'Activation Failed', 'status': 'failed', 'timestamp': act_ts},
+            ]
+        if status_lower == 'pending':
+            return [
+                {'step': 'Purchase Completed', 'status': 'completed', 'timestamp': act_ts},
+                {'step': 'Awaiting Activation', 'status': 'pending', 'timestamp': act_ts},
+            ]
+        steps = [
+            {'step': 'Purchase Completed', 'status': 'completed', 'timestamp': act_ts},
+            {'step': 'License Provisioned', 'status': 'completed', 'timestamp': act_ts},
+        ]
+        if self.Addons_Count:
+            steps.append({'step': f'Add-ons Activated ({self.Addons_Count})', 'status': 'completed', 'timestamp': act_ts})
+        steps.append({'step': 'Activation Completed', 'status': 'completed', 'timestamp': act_ts})
+        return steps
+
+    def save(self, *args, **kwargs):
+        if not self.Activation_Id:
+            self.Activation_Id = ActivationRecord_I()
+        if not self.Activation_Code:
+            self.Activation_Code = self.Activation_Id
+        if self.Customer_Id and not self.Customer_Name:
+            self.Customer_Name = (
+                getattr(self.Customer_Id, 'Organization_Name', None)
+                or getattr(self.Customer_Id, 'Contact_Name', None)
+            )
+        if self.Product_Id and not self.Product_Name:
+            self.Product_Name = getattr(self.Product_Id, 'Product_Name', None)
+        if not self.Plan_Edition_Name:
+            if self.Edition_Id and getattr(self.Edition_Id, 'Edition_Name', None):
+                self.Plan_Edition_Name = self.Edition_Id.Edition_Name
+            elif self.Plan_Id and getattr(self.Plan_Id, 'Plan_Name', None):
+                self.Plan_Edition_Name = self.Plan_Id.Plan_Name
+        if self.License_Id and not self.License_Key:
+            self.License_Key = getattr(self.License_Id, 'License_Key', None)
+        if (self.Status or '').lower() in ('deactivated', 'revoked', 'failed', 'expired'):
+            self.Is_Active = False
+        elif (self.Status or '').lower() in ('active', 'pending'):
+            self.Is_Active = True
+        if not self.Activation_Timeline:
+            self.Activation_Timeline = self.build_default_timeline()
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return self.Activation_Id or ''
+
+
+class ActivationQueueRequest(models.Model):
+    Request_Id = models.CharField(max_length=50, unique=True, default=ActivationQueueRequest_I)
+    Request_Code = models.CharField(max_length=100, blank=True, null=True)
+    Organization_Id = models.ForeignKey(Userorganizationmaster, on_delete=models.CASCADE, blank=True, null=True)
+    Purchase_Id = models.ForeignKey(PurchaseActivation, on_delete=models.SET_NULL, blank=True, null=True, related_name='queue_requests')
+    Activation_Id = models.ForeignKey(ActivationRecord, on_delete=models.SET_NULL, blank=True, null=True, related_name='queue_requests')
+    Customer_Id = models.ForeignKey('Account', on_delete=models.CASCADE, blank=True, null=True, related_name='activation_queue_requests')
+    Customer_Name = models.CharField(max_length=250, blank=True, null=True)
+    Product_Id = models.ForeignKey('ProductMaster', on_delete=models.CASCADE, blank=True, null=True, related_name='activation_queue_requests')
+    Product_Name = models.CharField(max_length=250, blank=True, null=True)
+    Plan_Id = models.ForeignKey('Plan', on_delete=models.SET_NULL, blank=True, null=True, related_name='activation_queue_requests')
+    Edition_Id = models.ForeignKey('ProductEdition', on_delete=models.SET_NULL, blank=True, null=True, related_name='activation_queue_requests')
+    Plan_Edition_Name = models.CharField(max_length=150, blank=True, null=True)
+    License_Id = models.ForeignKey('LicenseMaster', on_delete=models.SET_NULL, blank=True, null=True, related_name='activation_queue_requests')
+    Request_Type = models.CharField(max_length=50, default='Activation', blank=True, null=True)
+    Requested_On = models.DateTimeField(default=timezone.now, blank=True, null=True)
+    Requested_By = models.CharField(max_length=250, blank=True, null=True)
+    Priority = models.CharField(max_length=30, default='Medium', blank=True, null=True)
+    Status = models.CharField(max_length=50, default='Pending', blank=True, null=True)
+    Assigned_Reviewer = models.ForeignKey(UserAdmin, on_delete=models.SET_NULL, blank=True, null=True, related_name='assigned_queue_requests')
+    Reviewed_At = models.DateTimeField(blank=True, null=True)
+    Processed_At = models.DateTimeField(blank=True, null=True)
+    Processing_Time_Minutes = models.IntegerField(blank=True, null=True)
+    Rejection_Reason = models.TextField(blank=True, null=True)
+    Notes = models.TextField(blank=True, null=True)
+    Activation_Process = models.JSONField(default=list, blank=True, null=True)
+    Is_Active = models.BooleanField(default=True, blank=True, null=True)
+    Is_Deleted = models.BooleanField(default=False, blank=True, null=True)
+    Created_By = models.ForeignKey(UserAdmin, on_delete=models.CASCADE, related_name='created_activation_queue_set', blank=True, null=True)
+    Created_Date = models.DateTimeField(default=timezone.now, blank=True, null=True)
+    Updated_By = models.ForeignKey(UserAdmin, on_delete=models.CASCADE, related_name='updated_activation_queue_set', blank=True, null=True)
+    Updated_Date = models.DateTimeField(default=timezone.now, blank=True, null=True)
+
+    class Meta:
+        db_table = 'ActivationQueueRequest'
+        ordering = ['-id']
+
+    def build_default_process(self):
+        req_ts = self.Requested_On.isoformat() if self.Requested_On else timezone.now().isoformat()
+        rev_ts = self.Reviewed_At.isoformat() if self.Reviewed_At else None
+        proc_ts = self.Processed_At.isoformat() if self.Processed_At else None
+        st = (self.Status or 'Pending').lower()
+        return [
+            {'step': 'Request Received', 'status': 'completed', 'timestamp': req_ts},
+            {
+                'step': 'Under Review',
+                'status': 'completed' if st in ('approved', 'rejected') else ('in_progress' if st == 'in review' else 'pending'),
+                'timestamp': rev_ts,
+            },
+            {
+                'step': 'Approval & Provisioning',
+                'status': 'completed' if st == 'approved' else ('rejected' if st == 'rejected' else 'pending'),
+                'timestamp': proc_ts,
+            },
+            {
+                'step': 'Activation & Notification',
+                'status': 'completed' if st == 'approved' else 'pending',
+                'timestamp': proc_ts,
+            },
+        ]
+
+    def save(self, *args, **kwargs):
+        if not self.Request_Id:
+            self.Request_Id = ActivationQueueRequest_I()
+        if not self.Request_Code:
+            self.Request_Code = self.Request_Id
+        if self.Customer_Id and not self.Customer_Name:
+            self.Customer_Name = (
+                getattr(self.Customer_Id, 'Organization_Name', None)
+                or getattr(self.Customer_Id, 'Contact_Name', None)
+            )
+        if self.Product_Id and not self.Product_Name:
+            self.Product_Name = getattr(self.Product_Id, 'Product_Name', None)
+        if not self.Plan_Edition_Name:
+            if self.Edition_Id and getattr(self.Edition_Id, 'Edition_Name', None):
+                self.Plan_Edition_Name = self.Edition_Id.Edition_Name
+            elif self.Plan_Id and getattr(self.Plan_Id, 'Plan_Name', None):
+                self.Plan_Edition_Name = self.Plan_Id.Plan_Name
+        if self.Processed_At and self.Requested_On and self.Processing_Time_Minutes is None:
+            delta_secs = max(0, (self.Processed_At - self.Requested_On).total_seconds())
+            self.Processing_Time_Minutes = int(round(delta_secs / 60.0))
+        if (self.Status or '').lower() == 'rejected':
+            self.Is_Active = False
+        else:
+            self.Is_Active = True
+        if not self.Activation_Process:
+            self.Activation_Process = self.build_default_process()
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return self.Request_Id or ''
+
+
+
+
 

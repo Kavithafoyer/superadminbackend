@@ -1185,5 +1185,243 @@ class EditionAndPlanLookupsAPITests(SimpleTestCase):
         self.assertNotIn("iexact", filter_text)
 
 
+class PurchaseActivationTests(SimpleTestCase):
+    """Tests for PurchaseActivation models, serializer, CRUD/Filter/Action/Tab/KPI APIs."""
+
+    def setUp(self):
+        self.factory = APIRequestFactory()
+        self.user = SimpleNamespace(is_authenticated=True, pk=1, id=1)
+
+    def test_purchase_activation_urls_resolve(self):
+        from CRMSuperAdmin.views import (
+            PurchaseActivationActionAPI,
+            PurchaseActivationCRUD,
+            PurchaseActivationExportAPI,
+            PurchaseActivationFilter,
+            PurchaseActivationKPIAPI,
+            PurchaseActivationListwithPagination,
+            PurchaseActivationLookupsAPI,
+            PurchaseActivationSearch,
+            PurchaseActivationTabAPI,
+            PurchaseActivationlistwithoutpaginaton,
+        )
+
+        cases = [
+            ("purchase-activation-crud", PurchaseActivationCRUD),
+            ("purchase-activation-list-paginated", PurchaseActivationListwithPagination),
+            ("purchase-activation-search", PurchaseActivationSearch),
+            ("purchase-activation-list-without-pagination", PurchaseActivationlistwithoutpaginaton),
+            ("purchase-activation-filter", PurchaseActivationFilter),
+            ("purchase-activation-kpi", PurchaseActivationKPIAPI),
+            ("purchase-activation-action", PurchaseActivationActionAPI),
+            ("purchase-activation-tabs", PurchaseActivationTabAPI),
+            ("purchase-activation-lookups", PurchaseActivationLookupsAPI),
+            ("purchase-activation-export", PurchaseActivationExportAPI),
+        ]
+        for name, view_cls in cases:
+            url = reverse(name, kwargs={"tenant_name": "default"})
+            self.assertEqual(resolve(url).func.view_class, view_cls)
+
+    def test_apply_purchase_activation_scope_uses_icontains(self):
+        from CRMSuperAdmin.views import _apply_purchase_activation_scope
+
+        qs = MagicMock()
+        qs.filter.return_value = qs
+
+        _apply_purchase_activation_scope(
+            qs,
+            {
+                "Purchase_Id": "PUR-100458",
+                "Product": "CRM",
+                "Plan_Edition": "Professional",
+                "Purchase_Channel": "Direct",
+                "Activation_Status": "Activated",
+                "Payment_Status": "Paid",
+                "Tenant": "Euro",
+                "From_Date": "2026-10-01",
+                "To_Date": "2026-11-19",
+                "search": "Euro",
+            },
+        )
+        filter_text = " ".join(str(c) for c in qs.filter.call_args_list)
+        self.assertIn("icontains", filter_text)
+        self.assertNotIn("iexact", filter_text)
+
+    @patch("CRMSuperAdmin.views.PurchaseActivation")
+    def test_purchase_activation_kpi_returns_5_cards_and_inr(self, mock_pa):
+        import json
+        from CRMSuperAdmin.views import PurchaseActivationKPIAPI
+
+        base_qs = MagicMock()
+        base_qs.filter.return_value = base_qs
+        base_qs.count.side_effect = [1248, 1156, 42, 14]
+        base_qs.filter.return_value.aggregate.return_value = {"total": 486400}
+        ann_qs = MagicMock()
+        ann_qs.__iter__.return_value = iter([])
+        ann_qs.order_by.return_value = []
+        base_qs.values.return_value.annotate.return_value = ann_qs
+        mock_pa.objects.filter.return_value = base_qs
+
+        req = self.factory.get("/default/superadmin/PurchaseActivationKPI/")
+        force_authenticate(req, user=self.user)
+        resp = PurchaseActivationKPIAPI.as_view()(req, tenant_name="default")
+
+        self.assertEqual(resp.status_code, 200)
+        body = json.loads(resp.content)
+        self.assertTrue(body["status"])
+        self.assertEqual(body["total_purchases"], 1248)
+        self.assertEqual(body["activated_count"], 1156)
+        self.assertEqual(body["pending_activation_count"], 42)
+        self.assertEqual(body["failed_count"], 14)
+        self.assertEqual(body["total_revenue"], 486400.0)
+        self.assertEqual(body["total_revenue_formatted"], "₹4,86,400")
+        self.assertEqual(len(body["cards"]), 5)
+
+
+class ActivationAndQueueTests(SimpleTestCase):
+    """Tests for ActivationRecord and ActivationQueueRequest CRUD, Filter, Search, Action & KPI APIs."""
+
+    def setUp(self):
+        self.factory = APIRequestFactory()
+        self.user = SimpleNamespace(is_authenticated=True, pk=1, id=1)
+
+    def test_activation_and_queue_urls_resolve(self):
+        from CRMSuperAdmin.views import (
+            ActivationQueueActionAPI,
+            ActivationQueueExportAPI,
+            ActivationQueueRequestCRUD,
+            ActivationQueueRequestFilter,
+            ActivationQueueRequestKPIAPI,
+            ActivationQueueRequestListwithPagination,
+            ActivationQueueRequestSearch,
+            ActivationQueueRequestlistwithoutpaginaton,
+            ActivationRecordActionAPI,
+            ActivationRecordCRUD,
+            ActivationRecordExportAPI,
+            ActivationRecordFilter,
+            ActivationRecordKPIAPI,
+            ActivationRecordListwithPagination,
+            ActivationRecordSearch,
+            ActivationRecordlistwithoutpaginaton,
+        )
+
+        cases = [
+            ("activation-record-crud", ActivationRecordCRUD),
+            ("activation-record-list-paginated", ActivationRecordListwithPagination),
+            ("activation-record-search", ActivationRecordSearch),
+            ("activation-record-list-without-pagination", ActivationRecordlistwithoutpaginaton),
+            ("activation-record-filter", ActivationRecordFilter),
+            ("activation-record-kpi", ActivationRecordKPIAPI),
+            ("activation-record-action", ActivationRecordActionAPI),
+            ("activation-record-export", ActivationRecordExportAPI),
+            ("activation-queue-crud", ActivationQueueRequestCRUD),
+            ("activation-queue-list-paginated", ActivationQueueRequestListwithPagination),
+            ("activation-queue-search", ActivationQueueRequestSearch),
+            ("activation-queue-list-without-pagination", ActivationQueueRequestlistwithoutpaginaton),
+            ("activation-queue-filter", ActivationQueueRequestFilter),
+            ("activation-queue-kpi", ActivationQueueRequestKPIAPI),
+            ("activation-queue-action", ActivationQueueActionAPI),
+            ("activation-queue-export", ActivationQueueExportAPI),
+        ]
+        for name, view_cls in cases:
+            url = reverse(name, kwargs={"tenant_name": "default"})
+            self.assertEqual(resolve(url).func.view_class, view_cls)
+
+    def test_scopes_use_icontains_not_iexact(self):
+        from CRMSuperAdmin.views import _apply_activation_queue_scope, _apply_activation_record_scope
+
+        qs1 = MagicMock()
+        qs1.filter.return_value = qs1
+        _apply_activation_record_scope(
+            qs1,
+            {
+                "Activation_Id": "ACT-100458",
+                "Product": "CRM",
+                "Plan_Edition": "Professional",
+                "Tenant": "Euro",
+                "Status": "Active",
+                "License_Key": "PGT-CRM",
+                "search": "Euro",
+            },
+        )
+        t1 = " ".join(str(c) for c in qs1.filter.call_args_list)
+        self.assertIn("icontains", t1)
+        self.assertNotIn("iexact", t1)
+
+        qs2 = MagicMock()
+        qs2.filter.return_value = qs2
+        _apply_activation_queue_scope(
+            qs2,
+            {
+                "Request_Id": "AQ-100458",
+                "Product": "CRM",
+                "Request_Type": "Activation",
+                "Tenant": "Euro",
+                "Plan_Edition": "Professional",
+                "Status": "Pending",
+                "Priority": "High",
+                "search": "Euro",
+            },
+        )
+        t2 = " ".join(str(c) for c in qs2.filter.call_args_list)
+        self.assertIn("icontains", t2)
+        self.assertNotIn("iexact", t2)
+
+    @patch("CRMSuperAdmin.views.ActivationRecord")
+    def test_activation_record_kpi_returns_6_cards(self, mock_act):
+        import json
+        from CRMSuperAdmin.views import ActivationRecordKPIAPI
+
+        qs = MagicMock()
+        qs.filter.return_value = qs
+        qs.count.side_effect = [1156, 1072, 42, 14, 268, 36]
+        qs.values.return_value.annotate.return_value = []
+        mock_act.objects.filter.return_value = qs
+
+        req = self.factory.get("/default/superadmin/ActivationRecordKPI/")
+        force_authenticate(req, user=self.user)
+        resp = ActivationRecordKPIAPI.as_view()(req, tenant_name="default")
+
+        self.assertEqual(resp.status_code, 200)
+        body = json.loads(resp.content)
+        self.assertTrue(body["status"])
+        self.assertEqual(body["total_activations"], 1156)
+        self.assertEqual(body["active_count"], 1072)
+        self.assertEqual(body["pending_count"], 42)
+        self.assertEqual(body["failed_count"], 14)
+        self.assertEqual(body["renewed_count"], 268)
+        self.assertEqual(body["expiring_30_days_count"], 36)
+        self.assertEqual(len(body["cards"]), 6)
+
+    @patch("CRMSuperAdmin.views.ActivationQueueRequest")
+    def test_activation_queue_kpi_returns_5_cards_and_tab_counts(self, mock_aq):
+        import json
+        from CRMSuperAdmin.views import ActivationQueueRequestKPIAPI
+
+        qs = MagicMock()
+        qs.filter.return_value = qs
+        qs.count.side_effect = [42, 12, 6, 18, 20, 20, 3]
+        qs.filter.return_value.aggregate.return_value = {"avg_m": 12.0}
+        mock_aq.objects.filter.return_value = qs
+
+        req = self.factory.get("/default/superadmin/ActivationQueueRequestKPI/")
+        force_authenticate(req, user=self.user)
+        resp = ActivationQueueRequestKPIAPI.as_view()(req, tenant_name="default")
+
+        self.assertEqual(resp.status_code, 200)
+        body = json.loads(resp.content)
+        self.assertTrue(body["status"])
+        self.assertEqual(body["total_requests"], 42)
+        self.assertEqual(body["pending_review_count"], 18)
+        self.assertEqual(body["approved_today_count"], 20)
+        self.assertEqual(body["rejected_count"], 3)
+        self.assertEqual(body["avg_processing_time_mins"], 12)
+        self.assertEqual(body["avg_processing_time_label"], "12 mins")
+        self.assertEqual(body["tab_counts"]["in_review"], 6)
+        self.assertEqual(len(body["cards"]), 5)
+
+
+
+
 
 

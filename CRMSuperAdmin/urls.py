@@ -666,6 +666,38 @@ path('TrialConfigurationlistwithoutpaginaton/', TrialConfigurationlistwithoutpag
 path('TrialConfigurationFilter/', TrialConfigurationFilter.as_view(), name='trial-configuration-filter'),
 path('TrialConfigurationKPI/', TrialConfigurationKPIAPI.as_view(), name='trial-configuration-kpi'),
 
+# Purchase & Activation (ProductCategory pattern + KPI + Tabs + Actions)
+path('PurchaseActivationCRUD/', PurchaseActivationCRUD.as_view(), name='purchase-activation-crud'),
+path('PurchaseActivationListwithPagination/', PurchaseActivationListwithPagination.as_view(), name='purchase-activation-list-paginated'),
+path('PurchaseActivationSearch/', PurchaseActivationSearch.as_view(), name='purchase-activation-search'),
+path('PurchaseActivationlistwithoutpaginaton/', PurchaseActivationlistwithoutpaginaton.as_view(), name='purchase-activation-list-without-pagination'),
+path('PurchaseActivationFilter/', PurchaseActivationFilter.as_view(), name='purchase-activation-filter'),
+path('PurchaseActivationKPI/', PurchaseActivationKPIAPI.as_view(), name='purchase-activation-kpi'),
+path('PurchaseActivationAction/', PurchaseActivationActionAPI.as_view(), name='purchase-activation-action'),
+path('PurchaseActivationTabs/', PurchaseActivationTabAPI.as_view(), name='purchase-activation-tabs'),
+path('PurchaseActivationLookups/', PurchaseActivationLookupsAPI.as_view(), name='purchase-activation-lookups'),
+path('PurchaseActivationExport/', PurchaseActivationExportAPI.as_view(), name='purchase-activation-export'),
+
+# Activations Screen (ProductCategory pattern + KPI + Actions + Export)
+path('ActivationRecordCRUD/', ActivationRecordCRUD.as_view(), name='activation-record-crud'),
+path('ActivationRecordListwithPagination/', ActivationRecordListwithPagination.as_view(), name='activation-record-list-paginated'),
+path('ActivationRecordSearch/', ActivationRecordSearch.as_view(), name='activation-record-search'),
+path('ActivationRecordlistwithoutpaginaton/', ActivationRecordlistwithoutpaginaton.as_view(), name='activation-record-list-without-pagination'),
+path('ActivationRecordFilter/', ActivationRecordFilter.as_view(), name='activation-record-filter'),
+path('ActivationRecordKPI/', ActivationRecordKPIAPI.as_view(), name='activation-record-kpi'),
+path('ActivationRecordAction/', ActivationRecordActionAPI.as_view(), name='activation-record-action'),
+path('ActivationRecordExport/', ActivationRecordExportAPI.as_view(), name='activation-record-export'),
+
+# Activation Queue Screen (ProductCategory pattern + KPI + Actions + Export)
+path('ActivationQueueRequestCRUD/', ActivationQueueRequestCRUD.as_view(), name='activation-queue-crud'),
+path('ActivationQueueRequestListwithPagination/', ActivationQueueRequestListwithPagination.as_view(), name='activation-queue-list-paginated'),
+path('ActivationQueueRequestSearch/', ActivationQueueRequestSearch.as_view(), name='activation-queue-search'),
+path('ActivationQueueRequestlistwithoutpaginaton/', ActivationQueueRequestlistwithoutpaginaton.as_view(), name='activation-queue-list-without-pagination'),
+path('ActivationQueueRequestFilter/', ActivationQueueRequestFilter.as_view(), name='activation-queue-filter'),
+path('ActivationQueueRequestKPI/', ActivationQueueRequestKPIAPI.as_view(), name='activation-queue-kpi'),
+path('ActivationQueueAction/', ActivationQueueActionAPI.as_view(), name='activation-queue-action'),
+path('ActivationQueueExport/', ActivationQueueExportAPI.as_view(), name='activation-queue-export'),
+
 
 path('ProductMasterdropdownlist/', ProductMasterdropdownlist.as_view(), name='product-master-dropdown-list'),
 

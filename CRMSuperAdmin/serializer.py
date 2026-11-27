@@ -3533,3 +3533,554 @@ class ProductMasterdropdownlistSerializer(ProductMasterSerializerMixin, serializ
         fields = '__all__'
 
 
+# ==========================================
+# Purchase & Activation Serializer
+# ==========================================
+
+def _format_inr_amount(value, symbol='₹'):
+    """Format decimal/numeric value using Indian comma grouping (e.g. ₹4,86,400)."""
+    try:
+        num = Decimal(str(value or 0))
+    except Exception:
+        return f"{symbol}0"
+    neg = num < 0
+    num = abs(num)
+    if num == num.to_integral():
+        int_part = str(int(num))
+        dec_part = ''
+    else:
+        int_str, dec_part = f"{num:.2f}".split('.')
+        int_part = int_str
+        dec_part = '' if dec_part == '00' else f".{dec_part}"
+    if len(int_part) > 3:
+        last3 = int_part[-3:]
+        rest = int_part[:-3]
+        groups = []
+        while len(rest) > 2:
+            groups.append(rest[-2:])
+            rest = rest[:-2]
+        if rest:
+            groups.append(rest)
+        grouped = ','.join(reversed(groups)) + ',' + last3
+    else:
+        grouped = int_part
+    prefix = f"-{symbol}" if neg else symbol
+    return f"{prefix}{grouped}{dec_part}"
+
+
+class PurchaseActivationSerializer(_LicenseAuditSerializerMixin):
+    Purchase_Date = SafeDateField(required=False, allow_null=True)
+    License_Valid_From = SafeDateField(required=False, allow_null=True)
+    License_Valid_To = SafeDateField(required=False, allow_null=True)
+
+    customer_name = serializers.SerializerMethodField(read_only=True)
+    product_name = serializers.SerializerMethodField(read_only=True)
+    product_code = serializers.SerializerMethodField(read_only=True)
+    plan_name = serializers.SerializerMethodField(read_only=True)
+    edition_name = serializers.SerializerMethodField(read_only=True)
+    plan_edition_display = serializers.SerializerMethodField(read_only=True)
+    partner_name = serializers.SerializerMethodField(read_only=True)
+    license_key = serializers.SerializerMethodField(read_only=True)
+    subscription_code = serializers.SerializerMethodField(read_only=True)
+    payment_code = serializers.SerializerMethodField(read_only=True)
+    invoice_code = serializers.SerializerMethodField(read_only=True)
+    amount_formatted = serializers.SerializerMethodField(read_only=True)
+    license_validity_label = serializers.SerializerMethodField(read_only=True)
+    allocated_addons_details = serializers.SerializerMethodField(read_only=True)
+
+    class Meta:
+        model = PurchaseActivation
+        fields = '__all__'
+
+    def _resolve_addons_list(self, raw_addons):
+        if raw_addons in (None, ''):
+            return []
+        if isinstance(raw_addons, str):
+            raw_txt = raw_addons.strip()
+            if raw_txt.startswith('['):
+                try:
+                    raw_addons = json.loads(raw_txt)
+                except Exception:
+                    raw_addons = [x.strip() for x in raw_txt.split(',') if x.strip()]
+            else:
+                raw_addons = [x.strip() for x in raw_txt.split(',') if x.strip()]
+        if not isinstance(raw_addons, list):
+            raw_addons = [raw_addons]
+        resolved = []
+        for item in raw_addons:
+            pk = self._resolve_fk_pk(AddonMaster, item, 'Addon_Code', 'Addon_Name')
+            if isinstance(pk, int) and pk not in resolved:
+                resolved.append(pk)
+        return resolved
+
+    def to_internal_value(self, data):
+        data = self._normalize_data(data)
+
+        if 'Purchase_Id' in data and not data.get('Purchase_Code'):
+            data['Purchase_Code'] = data['Purchase_Id']
+        elif 'Purchase_Code' in data and not data.get('Purchase_Id'):
+            data['Purchase_Id'] = data['Purchase_Code']
+
+        alias_map = {
+            'customer_id': 'Customer_Id',
+            'tenant_id': 'Customer_Id',
+            'product_id': 'Product_Id',
+            'product': 'Product_Id',
+            'plan_id': 'Plan_Id',
+            'edition_id': 'Edition_Id',
+            'product_edition_id': 'Edition_Id',
+            'plan_edition_name': 'Plan_Edition_Name',
+            'purchase_channel': 'Purchase_Channel',
+            'channel': 'Purchase_Channel',
+            'partner_id': 'Partner_Id',
+            'purchase_date': 'Purchase_Date',
+            'amount': 'Amount',
+            'payment_status': 'Payment_Status',
+            'activation_status': 'Activation_Status',
+            'activation_date': 'Activation_Date',
+            'license_id': 'License_Id',
+            'subscription_id': 'Subscription_Id',
+            'payment_id': 'Payment_Id',
+            'invoice_id': 'Invoice_Id',
+            'license_valid_from': 'License_Valid_From',
+            'license_valid_to': 'License_Valid_To',
+            'valid_from': 'License_Valid_From',
+            'valid_to': 'License_Valid_To',
+            'entitled_users': 'Entitled_Users',
+            'users': 'Entitled_Users',
+            'assigned_users': 'Assigned_Users',
+            'allocated_addons': 'Allocated_Addons',
+            'addons': 'Allocated_Addons',
+            'activation_timeline': 'Activation_Timeline',
+            'failure_reason': 'Failure_Reason',
+            'notes': 'Notes',
+        }
+        for src_key, dst_key in alias_map.items():
+            if src_key in data and dst_key not in data:
+                data[dst_key] = data.pop(src_key)
+
+        if 'Customer_Id' in data:
+            data['Customer_Id'] = self._resolve_fk_pk(
+                Account, data.get('Customer_Id'), 'Account_Id', 'Organization_Name', 'Contact_Name'
+            )
+        if 'Product_Id' in data:
+            data['Product_Id'] = self._resolve_fk_pk(
+                ProductMaster, data.get('Product_Id'), 'Product_Code', 'Product_Name'
+            )
+        if 'Plan_Id' in data:
+            data['Plan_Id'] = self._resolve_fk_pk(
+                Plan, data.get('Plan_Id'), 'Plan_Id', 'Plan_Name'
+            )
+        if 'Edition_Id' in data:
+            data['Edition_Id'] = self._resolve_fk_pk(
+                ProductEdition, data.get('Edition_Id'), 'Edition_Id', 'Edition_Code', 'Edition_Name'
+            )
+        if 'License_Id' in data:
+            data['License_Id'] = self._resolve_fk_pk(
+                LicenseMaster, data.get('License_Id'), 'License_Id', 'License_Key'
+            )
+        if 'Subscription_Id' in data:
+            data['Subscription_Id'] = self._resolve_fk_pk(
+                Subscriptions, data.get('Subscription_Id'), 'Subscription_Id', 'Subscription_Name'
+            )
+        if 'Payment_Id' in data:
+            data['Payment_Id'] = self._resolve_fk_pk(
+                Payments, data.get('Payment_Id'), 'Payment_Id', 'Transaction_No'
+            )
+        if 'Invoice_Id' in data:
+            data['Invoice_Id'] = self._resolve_fk_pk(
+                Invoice, data.get('Invoice_Id'), 'Invoice_Id', 'Invoice_Code'
+            )
+        if 'Allocated_Addons' in data:
+            data['Allocated_Addons'] = self._resolve_addons_list(data.get('Allocated_Addons'))
+
+        self._inject_audit_defaults(data, is_partial=self.partial)
+        return super().to_internal_value(data)
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        valid_from = attrs.get('License_Valid_From', getattr(self.instance, 'License_Valid_From', None))
+        valid_to = attrs.get('License_Valid_To', getattr(self.instance, 'License_Valid_To', None))
+        if valid_from and valid_to and valid_to < valid_from:
+            raise serializers.ValidationError({'License_Valid_To': 'License_Valid_To must be on or after License_Valid_From.'})
+        return attrs
+
+    def create(self, validated_data):
+        instance = super().create(validated_data)
+        addons_count = instance.Allocated_Addons.count()
+        if addons_count and not instance.Addons_Count:
+            instance.Addons_Count = addons_count
+            instance.Activation_Timeline = instance.build_default_timeline()
+            instance.save(update_fields=['Addons_Count', 'Activation_Timeline'])
+        return instance
+
+    def update(self, instance, validated_data):
+        instance = super().update(instance, validated_data)
+        addons_count = instance.Allocated_Addons.count()
+        if addons_count != (instance.Addons_Count or 0) and 'Allocated_Addons' in validated_data:
+            instance.Addons_Count = addons_count
+            instance.save(update_fields=['Addons_Count'])
+        return instance
+
+    def get_customer_name(self, obj):
+        if obj.Customer_Id:
+            return getattr(obj.Customer_Id, 'Organization_Name', None) or getattr(obj.Customer_Id, 'Contact_Name', None)
+        return obj.Customer_Name
+
+    def get_product_name(self, obj):
+        if obj.Product_Id:
+            return getattr(obj.Product_Id, 'Product_Name', None)
+        return obj.Product_Name
+
+    def get_product_code(self, obj):
+        return getattr(obj.Product_Id, 'Product_Code', None) if obj.Product_Id else None
+
+    def get_plan_name(self, obj):
+        return getattr(obj.Plan_Id, 'Plan_Name', None) if obj.Plan_Id else None
+
+    def get_edition_name(self, obj):
+        return getattr(obj.Edition_Id, 'Edition_Name', None) if obj.Edition_Id else None
+
+    def get_plan_edition_display(self, obj):
+        return obj.Plan_Edition_Name or self.get_edition_name(obj) or self.get_plan_name(obj) or ''
+
+    def get_partner_name(self, obj):
+        if not obj.Partner_Id:
+            return None
+        return getattr(obj.Partner_Id, 'Company_Name', None) or getattr(obj.Partner_Id, 'Name', None) or str(obj.Partner_Id)
+
+    def get_license_key(self, obj):
+        return getattr(obj.License_Id, 'License_Key', None) if obj.License_Id else None
+
+    def get_subscription_code(self, obj):
+        return getattr(obj.Subscription_Id, 'Subscription_Id', None) if obj.Subscription_Id else None
+
+    def get_payment_code(self, obj):
+        return getattr(obj.Payment_Id, 'Payment_Id', None) if obj.Payment_Id else None
+
+    def get_invoice_code(self, obj):
+        if not obj.Invoice_Id:
+            return None
+        return getattr(obj.Invoice_Id, 'Invoice_Code', None) or getattr(obj.Invoice_Id, 'Invoice_Id', None)
+
+    def get_amount_formatted(self, obj):
+        return _format_inr_amount(obj.Amount, obj.Currency_Symbol or '₹')
+
+    def get_license_validity_label(self, obj):
+        if obj.License_Valid_From and obj.License_Valid_To:
+            return f"{obj.License_Valid_From.strftime('%d %b %Y')} - {obj.License_Valid_To.strftime('%d %b %Y')}"
+        return None
+
+    def get_allocated_addons_details(self, obj):
+        return [
+            {
+                'id': addon.id,
+                'Addon_Code': addon.Addon_Code,
+                'Addon_Name': addon.Addon_Name,
+            }
+            for addon in obj.Allocated_Addons.filter(Is_Deleted=False).order_by('id')
+        ]
+
+
+# ==========================================
+# Activations & Activation Queue Serializers
+# ==========================================
+
+class ActivationRecordSerializer(_LicenseAuditSerializerMixin):
+    Valid_From = SafeDateField(required=False, allow_null=True)
+    Valid_To = SafeDateField(required=False, allow_null=True)
+
+    customer_name = serializers.SerializerMethodField(read_only=True)
+    product_name = serializers.SerializerMethodField(read_only=True)
+    product_code = serializers.SerializerMethodField(read_only=True)
+    plan_name = serializers.SerializerMethodField(read_only=True)
+    edition_name = serializers.SerializerMethodField(read_only=True)
+    plan_edition_display = serializers.SerializerMethodField(read_only=True)
+    purchase_code = serializers.SerializerMethodField(read_only=True)
+    license_key_display = serializers.SerializerMethodField(read_only=True)
+    validity_label = serializers.SerializerMethodField(read_only=True)
+    entitlements_active = serializers.SerializerMethodField(read_only=True)
+    allocated_addons_details = serializers.SerializerMethodField(read_only=True)
+    is_expiring_soon = serializers.SerializerMethodField(read_only=True)
+
+    class Meta:
+        model = ActivationRecord
+        fields = '__all__'
+
+    def _resolve_addons_list(self, raw_addons):
+        if raw_addons in (None, ''):
+            return []
+        if isinstance(raw_addons, str):
+            raw_txt = raw_addons.strip()
+            if raw_txt.startswith('['):
+                try:
+                    raw_addons = json.loads(raw_txt)
+                except Exception:
+                    raw_addons = [x.strip() for x in raw_txt.split(',') if x.strip()]
+            else:
+                raw_addons = [x.strip() for x in raw_txt.split(',') if x.strip()]
+        if not isinstance(raw_addons, list):
+            raw_addons = [raw_addons]
+        resolved = []
+        for item in raw_addons:
+            pk = self._resolve_fk_pk(AddonMaster, item, 'Addon_Code', 'Addon_Name')
+            if isinstance(pk, int) and pk not in resolved:
+                resolved.append(pk)
+        return resolved
+
+    def to_internal_value(self, data):
+        data = self._normalize_data(data)
+
+        if 'Activation_Id' in data and not data.get('Activation_Code'):
+            data['Activation_Code'] = data['Activation_Id']
+        elif 'Activation_Code' in data and not data.get('Activation_Id'):
+            data['Activation_Id'] = data['Activation_Code']
+
+        alias_map = {
+            'purchase_id': 'Purchase_Id',
+            'customer_id': 'Customer_Id',
+            'tenant_id': 'Customer_Id',
+            'product_id': 'Product_Id',
+            'product': 'Product_Id',
+            'plan_id': 'Plan_Id',
+            'edition_id': 'Edition_Id',
+            'product_edition_id': 'Edition_Id',
+            'license_id': 'License_Id',
+            'license_key': 'License_Key',
+            'subscription_id': 'Subscription_Id',
+            'activated_on': 'Activated_On',
+            'valid_from': 'Valid_From',
+            'valid_to': 'Valid_To',
+            'entitled_users': 'Entitled_Users',
+            'assigned_users': 'Assigned_Users',
+            'storage_limit_gb': 'Storage_Limit_GB',
+            'core_modules': 'Core_Modules',
+            'addons': 'Allocated_Addons',
+            'allocated_addons': 'Allocated_Addons',
+            'status': 'Status',
+        }
+        for src_key, dst_key in alias_map.items():
+            if src_key in data and dst_key not in data:
+                data[dst_key] = data.pop(src_key)
+
+        if 'Purchase_Id' in data:
+            data['Purchase_Id'] = self._resolve_fk_pk(
+                PurchaseActivation, data.get('Purchase_Id'), 'Purchase_Id', 'Purchase_Code'
+            )
+        if 'Customer_Id' in data:
+            data['Customer_Id'] = self._resolve_fk_pk(
+                Account, data.get('Customer_Id'), 'Account_Id', 'Organization_Name', 'Contact_Name'
+            )
+        if 'Product_Id' in data:
+            data['Product_Id'] = self._resolve_fk_pk(
+                ProductMaster, data.get('Product_Id'), 'Product_Code', 'Product_Name'
+            )
+        if 'Plan_Id' in data:
+            data['Plan_Id'] = self._resolve_fk_pk(Plan, data.get('Plan_Id'), 'Plan_Id', 'Plan_Name')
+        if 'Edition_Id' in data:
+            data['Edition_Id'] = self._resolve_fk_pk(
+                ProductEdition, data.get('Edition_Id'), 'Edition_Id', 'Edition_Code', 'Edition_Name'
+            )
+        if 'License_Id' in data:
+            data['License_Id'] = self._resolve_fk_pk(
+                LicenseMaster, data.get('License_Id'), 'License_Id', 'License_Key'
+            )
+        if 'Subscription_Id' in data:
+            data['Subscription_Id'] = self._resolve_fk_pk(
+                Subscriptions, data.get('Subscription_Id'), 'Subscription_Id', 'Subscription_Name'
+            )
+        if 'Allocated_Addons' in data:
+            data['Allocated_Addons'] = self._resolve_addons_list(data.get('Allocated_Addons'))
+
+        self._inject_audit_defaults(data, is_partial=self.partial)
+        return super().to_internal_value(data)
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        valid_from = attrs.get('Valid_From', getattr(self.instance, 'Valid_From', None))
+        valid_to = attrs.get('Valid_To', getattr(self.instance, 'Valid_To', None))
+        if valid_from and valid_to and valid_to < valid_from:
+            raise serializers.ValidationError({'Valid_To': 'Valid_To must be on or after Valid_From.'})
+        return attrs
+
+    def create(self, validated_data):
+        instance = super().create(validated_data)
+        addons = list(instance.Allocated_Addons.filter(Is_Deleted=False))
+        if addons:
+            instance.Addons_Count = len(addons)
+            if not instance.Addons_Names:
+                instance.Addons_Names = ', '.join(a.Addon_Name for a in addons if a.Addon_Name)
+            instance.Activation_Timeline = instance.build_default_timeline()
+            instance.save(update_fields=['Addons_Count', 'Addons_Names', 'Activation_Timeline'])
+        return instance
+
+    def get_customer_name(self, obj):
+        if obj.Customer_Id:
+            return getattr(obj.Customer_Id, 'Organization_Name', None) or getattr(obj.Customer_Id, 'Contact_Name', None)
+        return obj.Customer_Name
+
+    def get_product_name(self, obj):
+        return getattr(obj.Product_Id, 'Product_Name', None) if obj.Product_Id else obj.Product_Name
+
+    def get_product_code(self, obj):
+        return getattr(obj.Product_Id, 'Product_Code', None) if obj.Product_Id else None
+
+    def get_plan_name(self, obj):
+        return getattr(obj.Plan_Id, 'Plan_Name', None) if obj.Plan_Id else None
+
+    def get_edition_name(self, obj):
+        return getattr(obj.Edition_Id, 'Edition_Name', None) if obj.Edition_Id else None
+
+    def get_plan_edition_display(self, obj):
+        return obj.Plan_Edition_Name or self.get_edition_name(obj) or self.get_plan_name(obj) or ''
+
+    def get_purchase_code(self, obj):
+        return getattr(obj.Purchase_Id, 'Purchase_Id', None) if obj.Purchase_Id else None
+
+    def get_license_key_display(self, obj):
+        return obj.License_Key or (getattr(obj.License_Id, 'License_Key', None) if obj.License_Id else None)
+
+    def get_validity_label(self, obj):
+        if obj.Valid_From and obj.Valid_To:
+            return f"{obj.Valid_From.strftime('%d %b %Y')} - {obj.Valid_To.strftime('%d %b %Y')}"
+        return None
+
+    def get_entitlements_active(self, obj):
+        if obj.Entitlements_Summary:
+            return obj.Entitlements_Summary
+        storage_val = float(obj.Storage_Limit_GB) if obj.Storage_Limit_GB is not None else 0
+        storage_str = f"{int(storage_val) if storage_val.is_integer() else storage_val} GB" if storage_val else "0 GB"
+        return {
+            'users': f"{obj.Assigned_Users or 0} / {obj.Entitled_Users or 0}",
+            'assigned_users': obj.Assigned_Users or 0,
+            'entitled_users': obj.Entitled_Users or 0,
+            'storage': storage_str,
+            'core_modules': obj.Core_Modules or '',
+            'addons': obj.Addons_Names or ', '.join(a.Addon_Name for a in obj.Allocated_Addons.filter(Is_Deleted=False) if a.Addon_Name),
+        }
+
+    def get_allocated_addons_details(self, obj):
+        return [
+            {'id': a.id, 'Addon_Code': a.Addon_Code, 'Addon_Name': a.Addon_Name}
+            for a in obj.Allocated_Addons.filter(Is_Deleted=False).order_by('id')
+        ]
+
+    def get_is_expiring_soon(self, obj):
+        if not obj.Valid_To:
+            return False
+        days = (obj.Valid_To - timezone.localdate()).days
+        return 0 <= days <= 30 and (obj.Status or '').lower() == 'active'
+
+
+class ActivationQueueRequestSerializer(_LicenseAuditSerializerMixin):
+    customer_name = serializers.SerializerMethodField(read_only=True)
+    product_name = serializers.SerializerMethodField(read_only=True)
+    product_code = serializers.SerializerMethodField(read_only=True)
+    plan_name = serializers.SerializerMethodField(read_only=True)
+    edition_name = serializers.SerializerMethodField(read_only=True)
+    plan_edition_display = serializers.SerializerMethodField(read_only=True)
+    purchase_code = serializers.SerializerMethodField(read_only=True)
+    activation_code = serializers.SerializerMethodField(read_only=True)
+    license_key = serializers.SerializerMethodField(read_only=True)
+    reviewer_name = serializers.SerializerMethodField(read_only=True)
+
+    class Meta:
+        model = ActivationQueueRequest
+        fields = '__all__'
+
+    def to_internal_value(self, data):
+        data = self._normalize_data(data)
+
+        if 'Request_Id' in data and not data.get('Request_Code'):
+            data['Request_Code'] = data['Request_Id']
+        elif 'Request_Code' in data and not data.get('Request_Id'):
+            data['Request_Id'] = data['Request_Code']
+
+        alias_map = {
+            'purchase_id': 'Purchase_Id',
+            'activation_id': 'Activation_Id',
+            'customer_id': 'Customer_Id',
+            'tenant_id': 'Customer_Id',
+            'product_id': 'Product_Id',
+            'product': 'Product_Id',
+            'plan_id': 'Plan_Id',
+            'edition_id': 'Edition_Id',
+            'product_edition_id': 'Edition_Id',
+            'license_id': 'License_Id',
+            'request_type': 'Request_Type',
+            'requested_on': 'Requested_On',
+            'requested_by': 'Requested_By',
+            'priority': 'Priority',
+            'status': 'Status',
+            'rejection_reason': 'Rejection_Reason',
+            'notes': 'Notes',
+        }
+        for src_key, dst_key in alias_map.items():
+            if src_key in data and dst_key not in data:
+                data[dst_key] = data.pop(src_key)
+
+        if 'Purchase_Id' in data:
+            data['Purchase_Id'] = self._resolve_fk_pk(
+                PurchaseActivation, data.get('Purchase_Id'), 'Purchase_Id', 'Purchase_Code'
+            )
+        if 'Activation_Id' in data:
+            data['Activation_Id'] = self._resolve_fk_pk(
+                ActivationRecord, data.get('Activation_Id'), 'Activation_Id', 'Activation_Code'
+            )
+        if 'Customer_Id' in data:
+            data['Customer_Id'] = self._resolve_fk_pk(
+                Account, data.get('Customer_Id'), 'Account_Id', 'Organization_Name', 'Contact_Name'
+            )
+        if 'Product_Id' in data:
+            data['Product_Id'] = self._resolve_fk_pk(
+                ProductMaster, data.get('Product_Id'), 'Product_Code', 'Product_Name'
+            )
+        if 'Plan_Id' in data:
+            data['Plan_Id'] = self._resolve_fk_pk(Plan, data.get('Plan_Id'), 'Plan_Id', 'Plan_Name')
+        if 'Edition_Id' in data:
+            data['Edition_Id'] = self._resolve_fk_pk(
+                ProductEdition, data.get('Edition_Id'), 'Edition_Id', 'Edition_Code', 'Edition_Name'
+            )
+        if 'License_Id' in data:
+            data['License_Id'] = self._resolve_fk_pk(
+                LicenseMaster, data.get('License_Id'), 'License_Id', 'License_Key'
+            )
+
+        self._inject_audit_defaults(data, is_partial=self.partial)
+        return super().to_internal_value(data)
+
+    def get_customer_name(self, obj):
+        if obj.Customer_Id:
+            return getattr(obj.Customer_Id, 'Organization_Name', None) or getattr(obj.Customer_Id, 'Contact_Name', None)
+        return obj.Customer_Name
+
+    def get_product_name(self, obj):
+        return getattr(obj.Product_Id, 'Product_Name', None) if obj.Product_Id else obj.Product_Name
+
+    def get_product_code(self, obj):
+        return getattr(obj.Product_Id, 'Product_Code', None) if obj.Product_Id else None
+
+    def get_plan_name(self, obj):
+        return getattr(obj.Plan_Id, 'Plan_Name', None) if obj.Plan_Id else None
+
+    def get_edition_name(self, obj):
+        return getattr(obj.Edition_Id, 'Edition_Name', None) if obj.Edition_Id else None
+
+    def get_plan_edition_display(self, obj):
+        return obj.Plan_Edition_Name or self.get_edition_name(obj) or self.get_plan_name(obj) or ''
+
+    def get_purchase_code(self, obj):
+        return getattr(obj.Purchase_Id, 'Purchase_Id', None) if obj.Purchase_Id else None
+
+    def get_activation_code(self, obj):
+        return getattr(obj.Activation_Id, 'Activation_Id', None) if obj.Activation_Id else None
+
+    def get_license_key(self, obj):
+        return getattr(obj.License_Id, 'License_Key', None) if obj.License_Id else None
+
+    def get_reviewer_name(self, obj):
+        return self._format_user_display(getattr(obj, 'Assigned_Reviewer', None))
+
+
+
+

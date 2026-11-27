@@ -21054,8 +21054,6 @@ class LicenseMasterExportAPI(APIView):
 
     def post(self, request, *args, **kwargs):
         return self._export_csv(request.data or {})
-
-
 # ========================================== TrialConfiguration (Single Table) =========================================== #
 
 def _apply_trial_configuration_scope(qs, params):
@@ -21385,4 +21383,1422 @@ class AddonDiscountCouponFilter(ListAPIView):
 
         except Exception as e:
             return HttpResponse(JSONRenderer().render({"Error":str(e)}),content_type='application/json',status=status.HTTP_400_BAD_REQUEST)
+
+
+# ========================================== Purchase & Activation =========================================== #
+
+def _format_inr_total(value, symbol="₹"):
+    try:
+        num = Decimal(str(value or 0))
+    except Exception:
+        return f"{symbol}0"
+    neg = num < 0
+    num = abs(num)
+    if num == num.to_integral():
+        int_part = str(int(num))
+        dec_part = ""
+    else:
+        int_part, dec_part = f"{num:.2f}".split(".")
+        dec_part = "" if dec_part == "00" else f".{dec_part}"
+    if len(int_part) > 3:
+        last3 = int_part[-3:]
+        rest = int_part[:-3]
+        groups = []
+        while len(rest) > 2:
+            groups.append(rest[-2:])
+            rest = rest[:-2]
+        if rest:
+            groups.append(rest)
+        grouped = ",".join(reversed(groups)) + "," + last3
+    else:
+        grouped = int_part
+    return f"{'-' if neg else ''}{symbol}{grouped}{dec_part}"
+
+
+def _apply_purchase_activation_scope(qs, params):
+    """Apply ProductCategory-style ORM filtering (all strings via icontains) on PurchaseActivation."""
+    if not params:
+        return qs
+
+    if params.get("Purchase_Id"):
+        qs = qs.filter(Purchase_Id__icontains=str(params.get("Purchase_Id")).strip())
+
+    if params.get("Purchase_Code"):
+        qs = qs.filter(Purchase_Code__icontains=str(params.get("Purchase_Code")).strip())
+
+    product_val = params.get("Product_Id") or params.get("Product") or params.get("product_id")
+    if product_val and str(product_val).strip().lower() not in ("all", "all products"):
+        p_txt = str(product_val).strip()
+        if p_txt.isdigit():
+            qs = qs.filter(Product_Id_id=int(p_txt))
+        else:
+            qs = qs.filter(
+                Q(Product_Id__Product_Code__icontains=p_txt)
+                | Q(Product_Id__Product_Name__icontains=p_txt)
+                | Q(Product_Name__icontains=p_txt)
+            )
+
+    plan_edition_val = (
+        params.get("Plan_Edition")
+        or params.get("Plan_Id")
+        or params.get("Edition_Id")
+        or params.get("plan_id")
+    )
+    if plan_edition_val and str(plan_edition_val).strip().lower() not in ("all", "all plans", "all editions"):
+        pe_txt = str(plan_edition_val).strip()
+        if pe_txt.isdigit():
+            qs = qs.filter(Q(Plan_Id_id=int(pe_txt)) | Q(Edition_Id_id=int(pe_txt)))
+        else:
+            qs = qs.filter(
+                Q(Plan_Edition_Name__icontains=pe_txt)
+                | Q(Plan_Id__Plan_Name__icontains=pe_txt)
+                | Q(Plan_Id__Plan_Id__icontains=pe_txt)
+                | Q(Edition_Id__Edition_Name__icontains=pe_txt)
+                | Q(Edition_Id__Edition_Code__icontains=pe_txt)
+            )
+
+    channel_val = params.get("Purchase_Channel") or params.get("Channel") or params.get("purchase_channel")
+    if channel_val and str(channel_val).strip().lower() not in ("all", "all channels"):
+        qs = qs.filter(Purchase_Channel__icontains=str(channel_val).strip())
+
+    act_status = params.get("Activation_Status") or params.get("Status") or params.get("activation_status")
+    if act_status and str(act_status).strip().lower() not in ("all", "all status", "all statuses"):
+        qs = qs.filter(Activation_Status__icontains=str(act_status).strip())
+
+    pay_status = params.get("Payment_Status") or params.get("payment_status")
+    if pay_status and str(pay_status).strip().lower() not in ("all", "all status", "all statuses"):
+        qs = qs.filter(Payment_Status__icontains=str(pay_status).strip())
+
+    customer_val = params.get("Customer_Id") or params.get("Tenant") or params.get("customer_id")
+    if customer_val and str(customer_val).strip().lower() not in ("all", "all tenants", "all customers"):
+        c_txt = str(customer_val).strip()
+        if c_txt.isdigit():
+            qs = qs.filter(Customer_Id_id=int(c_txt))
+        else:
+            qs = qs.filter(
+                Q(Customer_Id__Organization_Name__icontains=c_txt)
+                | Q(Customer_Id__Contact_Name__icontains=c_txt)
+                | Q(Customer_Id__Account_Id__icontains=c_txt)
+                | Q(Customer_Name__icontains=c_txt)
+            )
+
+    if params.get("Partner_Id") and str(params.get("Partner_Id")).isdigit():
+        qs = qs.filter(Partner_Id_id=int(params.get("Partner_Id")))
+
+    is_active = _parse_bool_flag(params.get("Is_Active"))
+    if is_active is not None:
+        qs = qs.filter(Is_Active=is_active)
+
+    if params.get("Organization_Id") and str(params.get("Organization_Id")).isdigit():
+        qs = qs.filter(Organization_Id_id=int(params.get("Organization_Id")))
+
+    if params.get("Created_By") and str(params.get("Created_By")).isdigit():
+        qs = qs.filter(Created_By_id=int(params.get("Created_By")))
+
+    from_date = params.get("fromdate") or params.get("from_date") or params.get("From_Date")
+    to_date = params.get("todate") or params.get("to_date") or params.get("To_Date")
+    if from_date and to_date:
+        qs = qs.filter(Purchase_Date__range=[str(from_date).split("T")[0], str(to_date).split("T")[0]])
+    elif from_date:
+        qs = qs.filter(Purchase_Date__gte=str(from_date).split("T")[0])
+    elif to_date:
+        qs = qs.filter(Purchase_Date__lte=str(to_date).split("T")[0])
+
+    search = params.get("search")
+    if search:
+        term = str(search).strip()
+        qs = qs.filter(
+            Q(Purchase_Id__icontains=term)
+            | Q(Purchase_Code__icontains=term)
+            | Q(Customer_Name__icontains=term)
+            | Q(Customer_Id__Organization_Name__icontains=term)
+            | Q(Customer_Id__Contact_Name__icontains=term)
+            | Q(Product_Name__icontains=term)
+            | Q(Product_Id__Product_Name__icontains=term)
+            | Q(Product_Id__Product_Code__icontains=term)
+            | Q(Plan_Edition_Name__icontains=term)
+            | Q(Purchase_Channel__icontains=term)
+            | Q(Payment_Status__icontains=term)
+            | Q(Activation_Status__icontains=term)
+            | Q(Invoice_Id__Invoice_Id__icontains=term)
+            | Q(Invoice_Id__Invoice_Code__icontains=term)
+            | Q(Payment_Id__Payment_Id__icontains=term)
+            | Q(Payment_Id__Transaction_No__icontains=term)
+            | Q(License_Id__License_Key__icontains=term)
+        )
+
+    return qs
+
+
+class PurchaseActivationCRUD(_ProductCategoryStyleCRUDView):
+    model_cls = PurchaseActivation
+    serializer_cls = PurchaseActivationSerializer
+    code_fields = ("Purchase_Id", "Purchase_Code")
+    entity_label = "PurchaseActivation"
+    select_related_fields = (
+        "Customer_Id",
+        "Product_Id",
+        "Plan_Id",
+        "Edition_Id",
+        "Partner_Id",
+        "License_Id",
+        "Subscription_Id",
+        "Payment_Id",
+        "Invoice_Id",
+    )
+    prefetch_related_fields = ("Allocated_Addons",)
+
+
+class PurchaseActivationListwithPagination(ListAPIView):
+    queryset = PurchaseActivation.objects.all()
+    serializer_class = PurchaseActivationSerializer
+
+    def get_queryset(self):
+        try:
+            qs = (
+                PurchaseActivation.objects.filter(Q(Is_Deleted=False))
+                .select_related(
+                    "Customer_Id", "Product_Id", "Plan_Id", "Edition_Id",
+                    "Partner_Id", "License_Id", "Subscription_Id", "Payment_Id", "Invoice_Id",
+                )
+                .prefetch_related("Allocated_Addons")
+                .order_by("-id")
+            )
+            return _apply_purchase_activation_scope(qs, self.request.query_params)
+        except Exception as e:
+            raise Exception(f"Error while fetching PurchaseActivation: {str(e)}")
+
+
+class PurchaseActivationSearch(ListAPIView):
+    queryset = PurchaseActivation.objects.all()
+    serializer_class = PurchaseActivationSerializer
+
+    def get_queryset(self):
+        try:
+            qs = (
+                PurchaseActivation.objects.filter(Is_Deleted=False)
+                .select_related(
+                    "Customer_Id", "Product_Id", "Plan_Id", "Edition_Id",
+                    "Partner_Id", "License_Id", "Subscription_Id", "Payment_Id", "Invoice_Id",
+                )
+                .prefetch_related("Allocated_Addons")
+                .order_by("-id")
+            )
+            return _apply_purchase_activation_scope(qs, self.request.GET)
+        except Exception as e:
+            raise Exception(f"Error while searching PurchaseActivation: {str(e)}")
+
+
+class PurchaseActivationlistwithoutpaginaton(APIView):
+    def get(self, request, *args, **kwargs):
+        try:
+            qs = (
+                PurchaseActivation.objects.filter(Is_Deleted=False)
+                .select_related(
+                    "Customer_Id", "Product_Id", "Plan_Id", "Edition_Id",
+                    "Partner_Id", "License_Id", "Subscription_Id", "Payment_Id", "Invoice_Id",
+                )
+                .prefetch_related("Allocated_Addons")
+                .order_by("-id")
+            )
+            qs = _apply_purchase_activation_scope(qs, request.query_params)
+            serialize = PurchaseActivationSerializer(qs, many=True)
+            return HttpResponse(JSONRenderer().render(serialize.data), content_type="application/json", status=status.HTTP_200_OK)
+        except Exception as e:
+            return HttpResponse(JSONRenderer().render({"Error": str(e)}), content_type="application/json", status=status.HTTP_400_BAD_REQUEST)
+
+
+class PurchaseActivationFilter(ListAPIView):
+    queryset = PurchaseActivation.objects.all()
+    serializer_class = PurchaseActivationSerializer
+
+    def post(self, request, *args, **kwargs):
+        try:
+            data = request.data or {}
+            qs = (
+                PurchaseActivation.objects.filter(Is_Deleted=False)
+                .select_related(
+                    "Customer_Id", "Product_Id", "Plan_Id", "Edition_Id",
+                    "Partner_Id", "License_Id", "Subscription_Id", "Payment_Id", "Invoice_Id",
+                )
+                .prefetch_related("Allocated_Addons")
+                .order_by("-id")
+            )
+            qs = _apply_purchase_activation_scope(qs, data)
+            return _paginate_queryset(qs, PurchaseActivationSerializer, page=data.get("page", 1), page_size=data.get("page_size"))
+        except Exception as e:
+            return HttpResponse(JSONRenderer().render({"Error": str(e)}), content_type="application/json", status=status.HTTP_400_BAD_REQUEST)
+
+
+class PurchaseActivationKPIAPI(APIView):
+    """Returns 5 KPI cards & breakdowns for Purchase & Activation."""
+
+    def _build_kpi_response(self, params):
+        qs = _apply_purchase_activation_scope(
+            PurchaseActivation.objects.filter(Is_Deleted=False), params
+        )
+        total_purchases = qs.count()
+        activated_count = qs.filter(Activation_Status__icontains="Activated").count()
+        pending_activation_count = qs.filter(
+            Q(Activation_Status__icontains="Pending") | Q(Activation_Status__icontains="In Progress")
+        ).count()
+        failed_count = qs.filter(
+            Q(Activation_Status__icontains="Failed") | Q(Payment_Status__icontains="Failed")
+        ).count()
+
+        rev_agg = qs.filter(Payment_Status__icontains="Paid").aggregate(total=Sum("Amount"))
+        if rev_agg.get("total") is None:
+            rev_agg = qs.exclude(Payment_Status__icontains="Failed").aggregate(total=Sum("Amount"))
+        total_revenue = float(rev_agg.get("total") or 0)
+        total_revenue_formatted = _format_inr_total(total_revenue)
+
+        channel_breakdown = {
+            (row["Purchase_Channel"] or "Direct"): row["count"]
+            for row in qs.values("Purchase_Channel").annotate(count=Count("id"))
+        }
+        activation_status_breakdown = {
+            (row["Activation_Status"] or "Pending"): row["count"]
+            for row in qs.values("Activation_Status").annotate(count=Count("id"))
+        }
+        payment_status_breakdown = {
+            (row["Payment_Status"] or "Pending"): row["count"]
+            for row in qs.values("Payment_Status").annotate(count=Count("id"))
+        }
+        product_breakdown = [
+            {
+                "product_id": row["Product_Id_id"],
+                "product_name": row["Product_Id__Product_Name"] or row["Product_Name"] or "Unassigned",
+                "count": row["count"],
+            }
+            for row in qs.values("Product_Id_id", "Product_Id__Product_Name", "Product_Name").annotate(count=Count("id")).order_by("-count")
+        ]
+
+        payload = {
+            "status": True,
+            "total_purchases": total_purchases,
+            "activated_count": activated_count,
+            "pending_activation_count": pending_activation_count,
+            "failed_count": failed_count,
+            "total_revenue": round(total_revenue, 2),
+            "total_revenue_formatted": total_revenue_formatted,
+            "channel_breakdown": channel_breakdown,
+            "activation_status_breakdown": activation_status_breakdown,
+            "payment_status_breakdown": payment_status_breakdown,
+            "product_breakdown": product_breakdown,
+            "cards": [
+                {"key": "total_purchases", "label": "Total Purchases", "value": total_purchases},
+                {"key": "activated_count", "label": "Activated", "value": activated_count},
+                {"key": "pending_activation_count", "label": "Pending Activation", "value": pending_activation_count},
+                {"key": "failed_count", "label": "Failed", "value": failed_count},
+                {"key": "total_revenue", "label": "Total Revenue", "value": total_revenue_formatted, "raw_value": round(total_revenue, 2)},
+            ],
+        }
+        return HttpResponse(JSONRenderer().render(payload), content_type="application/json", status=status.HTTP_200_OK)
+
+    def get(self, request, *args, **kwargs):
+        try:
+            return self._build_kpi_response(request.query_params)
+        except Exception as e:
+            return HttpResponse(JSONRenderer().render({"Error": str(e)}), content_type="application/json", status=status.HTTP_400_BAD_REQUEST)
+
+    def post(self, request, *args, **kwargs):
+        try:
+            return self._build_kpi_response(request.data or {})
+        except Exception as e:
+            return HttpResponse(JSONRenderer().render({"Error": str(e)}), content_type="application/json", status=status.HTTP_400_BAD_REQUEST)
+
+
+class PurchaseActivationActionAPI(APIView):
+    """Handles Activate / Provision License, Retry, Mark Paid, Mark Failed, and Cancel actions."""
+
+    @transaction.atomic
+    def post(self, request, *args, **kwargs):
+        try:
+            data = request.data or {}
+            action = str(data.get("action") or "").strip().lower()
+            if not action:
+                raise Exception("action is required (activate, retry, mark_paid, mark_failed, cancel)")
+
+            qs = PurchaseActivation.objects.filter(Is_Deleted=False)
+            if data.get("id"):
+                pur = qs.get(id=data.get("id"))
+            elif data.get("Purchase_Id"):
+                pur = qs.filter(Purchase_Id__icontains=str(data.get("Purchase_Id")).strip()).order_by("id").first()
+            elif data.get("Purchase_Code"):
+                pur = qs.filter(Purchase_Code__icontains=str(data.get("Purchase_Code")).strip()).order_by("id").first()
+            else:
+                raise Exception("id, Purchase_Id, or Purchase_Code is required")
+
+            if pur is None:
+                raise PurchaseActivation.DoesNotExist("PurchaseActivation not found")
+
+            now_dt = timezone.now()
+            now_iso = now_dt.isoformat()
+            timeline = list(pur.Activation_Timeline or [])
+
+            if action == "activate":
+                valid_from = pur.License_Valid_From or timezone.localdate()
+                valid_to = pur.License_Valid_To or (valid_from + timedelta(days=365))
+                pur.License_Valid_From = valid_from
+                pur.License_Valid_To = valid_to
+                pur.Payment_Status = data.get("payment_status") or "Paid"
+                pur.Activation_Status = "Activated"
+                pur.Activation_Date = now_dt
+                pur.Is_Active = True
+
+                # Provision LicenseMaster automatically if not yet attached
+                if not pur.License_Id:
+                    lic = LicenseMaster.objects.create(
+                        Organization_Id=pur.Organization_Id,
+                        Customer_Id=pur.Customer_Id,
+                        Customer_Name=pur.Customer_Name,
+                        Product_Id=pur.Product_Id,
+                        Product_Name=pur.Product_Name,
+                        Plan_Id=pur.Plan_Id,
+                        ProductEdition_id=pur.Edition_Id,
+                        Plan_Edition_Name=pur.Plan_Edition_Name,
+                        Subscription_Id=pur.Subscription_Id,
+                        License_Type="Subscription",
+                        Entitled_Users=pur.Entitled_Users or 0,
+                        Assigned_Users=pur.Assigned_Users or 0,
+                        Valid_From=valid_from,
+                        Valid_To=valid_to,
+                        Activated_On=valid_from,
+                        Status="Active",
+                        Created_By=pur.Updated_By or pur.Created_By,
+                        Updated_By=pur.Updated_By or pur.Created_By,
+                    )
+                    pur.License_Id = lic
+
+                addons_cnt = pur.Allocated_Addons.count() or int(pur.Addons_Count or 0)
+                pur.Addons_Count = addons_cnt
+                timeline = pur.build_default_timeline()
+                pur.Activation_Timeline = timeline
+                pur.save()
+
+            elif action == "mark_paid":
+                pur.Payment_Status = "Paid"
+                timeline.append({"step": "Payment Confirmed", "status": "completed", "timestamp": now_iso})
+                pur.Activation_Timeline = timeline
+                pur.save()
+
+            elif action == "mark_failed":
+                pur.Activation_Status = "Failed"
+                if data.get("payment_failed"):
+                    pur.Payment_Status = "Failed"
+                if data.get("reason") or data.get("Failure_Reason"):
+                    pur.Failure_Reason = data.get("reason") or data.get("Failure_Reason")
+                timeline.append({"step": "Activation Failed", "status": "failed", "timestamp": now_iso})
+                pur.Activation_Timeline = timeline
+                pur.save()
+
+            elif action == "retry":
+                pur.Activation_Status = "Pending"
+                pur.Failure_Reason = ""
+                pur.Is_Active = True
+                timeline.append({"step": "Retry Queued", "status": "pending", "timestamp": now_iso})
+                pur.Activation_Timeline = timeline
+                pur.save()
+
+            elif action == "cancel":
+                pur.Activation_Status = "Cancelled"
+                pur.Is_Active = False
+                timeline.append({"step": "Purchase Cancelled", "status": "cancelled", "timestamp": now_iso})
+                pur.Activation_Timeline = timeline
+                pur.save()
+
+            else:
+                raise Exception(f"Unsupported action: {action}")
+
+            pur.refresh_from_db()
+            return HttpResponse(
+                JSONRenderer().render({"status": True, "action": action, "data": PurchaseActivationSerializer(pur).data}),
+                content_type="application/json",
+                status=status.HTTP_200_OK,
+            )
+        except Exception as e:
+            return HttpResponse(
+                JSONRenderer().render({"Error": str(e)}),
+                content_type="application/json",
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+
+class PurchaseActivationTabAPI(APIView):
+    """Unified tab endpoint for Activations, Activation Queue, Payment Transactions, Invoices, and Usage."""
+
+    def _handle(self, params):
+        tab = str(params.get("tab") or "purchases").strip().lower()
+        page_num = max(1, int(params.get("page") or 1))
+        page_size = int(params.get("page_size") or REST_FRAMEWORK.get("PAGE_SIZE", 10) or 10)
+
+        qs = (
+            PurchaseActivation.objects.filter(Is_Deleted=False)
+            .select_related(
+                "Customer_Id", "Product_Id", "Plan_Id", "Edition_Id",
+                "Partner_Id", "License_Id", "Subscription_Id", "Payment_Id", "Invoice_Id",
+            )
+            .prefetch_related("Allocated_Addons")
+        )
+        qs = _apply_purchase_activation_scope(qs, params)
+
+        if tab == "activations":
+            qs = qs.filter(Activation_Status__icontains="Activated").order_by("-Activation_Date", "-id")
+            return _paginate_queryset(qs, PurchaseActivationSerializer, page=page_num, page_size=page_size)
+
+        if tab in ("activation_queue", "queue"):
+            qs = qs.filter(
+                Q(Activation_Status__icontains="Pending") | Q(Activation_Status__icontains="In Progress")
+            ).order_by("Purchase_Date", "id")
+            return _paginate_queryset(qs, PurchaseActivationSerializer, page=page_num, page_size=page_size)
+
+        if tab in ("payment_transactions", "payments"):
+            qs = qs.order_by("-id")
+            total = qs.count()
+            start = (page_num - 1) * page_size
+            items = qs[start:start + page_size]
+            results = [
+                {
+                    "id": p.id,
+                    "Purchase_Id": p.Purchase_Id,
+                    "Payment_Id": p.Payment_Id.Payment_Id if p.Payment_Id else None,
+                    "Transaction_No": p.Payment_Id.Transaction_No if p.Payment_Id else None,
+                    "Payment_Mode": p.Payment_Id.Payment_Mode if p.Payment_Id else None,
+                    "Customer_Name": p.Customer_Name or (p.Customer_Id.Organization_Name if p.Customer_Id else ""),
+                    "Product_Name": p.Product_Name or (p.Product_Id.Product_Name if p.Product_Id else ""),
+                    "Amount": float(p.Amount or 0),
+                    "Amount_Formatted": _format_inr_total(p.Amount, p.Currency_Symbol or "₹"),
+                    "Payment_Date": p.Payment_Id.Payment_Date.isoformat() if (p.Payment_Id and p.Payment_Id.Payment_Date) else (p.Purchase_Date.isoformat() if p.Purchase_Date else None),
+                    "Payment_Status": p.Payment_Status,
+                }
+                for p in items
+            ]
+            return HttpResponse(
+                JSONRenderer().render({"count": total, "page": page_num, "results": results}),
+                content_type="application/json",
+                status=status.HTTP_200_OK,
+            )
+
+        if tab == "invoices":
+            qs = qs.order_by("-id")
+            total = qs.count()
+            start = (page_num - 1) * page_size
+            items = qs[start:start + page_size]
+            results = [
+                {
+                    "id": p.id,
+                    "Purchase_Id": p.Purchase_Id,
+                    "Invoice_Id": p.Invoice_Id.Invoice_Id if p.Invoice_Id else None,
+                    "Invoice_Code": p.Invoice_Id.Invoice_Code if p.Invoice_Id else None,
+                    "Invoice_Date": p.Invoice_Id.Invoice_Date.isoformat() if (p.Invoice_Id and p.Invoice_Id.Invoice_Date) else (p.Purchase_Date.isoformat() if p.Purchase_Date else None),
+                    "Customer_Name": p.Customer_Name or (p.Customer_Id.Organization_Name if p.Customer_Id else ""),
+                    "Product_Name": p.Product_Name or (p.Product_Id.Product_Name if p.Product_Id else ""),
+                    "NetAmount": float(p.Invoice_Id.NetAmount) if p.Invoice_Id else float(p.Amount or 0),
+                    "Amount_Formatted": _format_inr_total(p.Invoice_Id.NetAmount if p.Invoice_Id else p.Amount, p.Currency_Symbol or "₹"),
+                    "Payment_Status": p.Payment_Status,
+                }
+                for p in items
+            ]
+            return HttpResponse(
+                JSONRenderer().render({"count": total, "page": page_num, "results": results}),
+                content_type="application/json",
+                status=status.HTTP_200_OK,
+            )
+
+        if tab == "usage":
+            qs = qs.order_by("-id")
+            total = qs.count()
+            start = (page_num - 1) * page_size
+            items = qs[start:start + page_size]
+            results = []
+            for p in items:
+                lic = p.License_Id
+                entitled = int((lic.Entitled_Users if lic else p.Entitled_Users) or 0)
+                assigned = int((lic.Assigned_Users if lic else p.Assigned_Users) or 0)
+                pct = round((assigned / entitled) * 100, 1) if entitled > 0 else 0.0
+                results.append(
+                    {
+                        "id": p.id,
+                        "Purchase_Id": p.Purchase_Id,
+                        "License_Key": lic.License_Key if lic else None,
+                        "Customer_Name": p.Customer_Name or (p.Customer_Id.Organization_Name if p.Customer_Id else ""),
+                        "Product_Name": p.Product_Name or (p.Product_Id.Product_Name if p.Product_Id else ""),
+                        "Plan_Edition_Name": p.Plan_Edition_Name or "",
+                        "Entitled_Users": entitled,
+                        "Assigned_Users": assigned,
+                        "Utilization_Pct": pct,
+                        "Addons_Count": p.Addons_Count or 0,
+                        "Activation_Status": p.Activation_Status,
+                    }
+                )
+            return HttpResponse(
+                JSONRenderer().render({"count": total, "page": page_num, "results": results}),
+                content_type="application/json",
+                status=status.HTTP_200_OK,
+            )
+
+        return _paginate_queryset(qs.order_by("-id"), PurchaseActivationSerializer, page=page_num, page_size=page_size)
+
+    def get(self, request, *args, **kwargs):
+        try:
+            return self._handle(request.query_params)
+        except Exception as e:
+            return HttpResponse(JSONRenderer().render({"Error": str(e)}), content_type="application/json", status=status.HTTP_400_BAD_REQUEST)
+
+    def post(self, request, *args, **kwargs):
+        try:
+            return self._handle(request.data or {})
+        except Exception as e:
+            return HttpResponse(JSONRenderer().render({"Error": str(e)}), content_type="application/json", status=status.HTTP_400_BAD_REQUEST)
+
+
+class PurchaseActivationLookupsAPI(APIView):
+    """Returns dropdown options for Purchase & Activation filters and Register Purchase modal."""
+
+    def get(self, request, *args, **kwargs):
+        try:
+            products = list(
+                ProductMaster.objects.filter(Is_Deleted=False, Is_Active=True)
+                .values("id", "Product_Code", "Product_Name")
+                .order_by("id")
+            )
+            plans = list(
+                Plan.objects.filter(Is_Deleted=False, Is_Active_Flg=True)
+                .values("id", "Plan_Id", "Plan_Name", "Product_id", "ProductEdition_id_id", "ProductEdition_Name")
+                .order_by("id")
+            )
+            editions = list(
+                ProductEdition.objects.filter(Is_Deleted=False, Is_Active=True)
+                .values("id", "Edition_Id", "Edition_Code", "Edition_Name", "Product_Id_id")
+                .order_by("id")
+            )
+            customers = list(
+                Account.objects.filter(Is_Deleted=False)
+                .values("id", "Account_Id", "Organization_Name", "Contact_Name")
+                .order_by("-id")[:200]
+            )
+            addons = list(
+                AddonMaster.objects.filter(Is_Deleted=False, Is_Active=True)
+                .values("id", "Addon_Code", "Addon_Name")
+                .order_by("id")
+            )
+            return HttpResponse(
+                JSONRenderer().render(
+                    {
+                        "status": True,
+                        "products": products,
+                        "plans": plans,
+                        "editions": editions,
+                        "customers": customers,
+                        "addons": addons,
+                        "purchase_channels": ["Direct", "Partner", "Online", "Sales Team", "Marketplace"],
+                        "payment_statuses": ["Paid", "Pending", "Failed", "Refunded"],
+                        "activation_statuses": ["Activated", "Pending", "In Progress", "Failed", "Cancelled"],
+                    }
+                ),
+                content_type="application/json",
+                status=status.HTTP_200_OK,
+            )
+        except Exception as e:
+            return HttpResponse(JSONRenderer().render({"Error": str(e)}), content_type="application/json", status=status.HTTP_400_BAD_REQUEST)
+
+
+class PurchaseActivationExportAPI(APIView):
+    """Exports filtered PurchaseActivation rows to CSV."""
+
+    def _export_csv(self, params):
+        qs = (
+            PurchaseActivation.objects.filter(Is_Deleted=False)
+            .select_related("Customer_Id", "Product_Id", "Plan_Id", "Edition_Id", "License_Id")
+            .order_by("-id")
+        )
+        qs = _apply_purchase_activation_scope(qs, params)
+        response = HttpResponse(content_type="text/csv")
+        response["Content-Disposition"] = 'attachment; filename="purchases_activations_export.csv"'
+        writer = csv.writer(response)
+        writer.writerow([
+            "Purchase ID", "Customer / Tenant", "Product", "Plan / Edition",
+            "Purchase Channel", "Purchase Date", "Amount", "Payment Status",
+            "Activation Status", "Activation Date", "License Key",
+        ])
+        for p in qs:
+            writer.writerow([
+                p.Purchase_Id,
+                p.Customer_Name or (p.Customer_Id.Organization_Name if p.Customer_Id else ""),
+                p.Product_Name or (p.Product_Id.Product_Name if p.Product_Id else ""),
+                p.Plan_Edition_Name or "",
+                p.Purchase_Channel or "",
+                p.Purchase_Date.isoformat() if p.Purchase_Date else "",
+                str(p.Amount or 0),
+                p.Payment_Status or "",
+                p.Activation_Status or "",
+                p.Activation_Date.isoformat() if p.Activation_Date else "",
+                p.License_Id.License_Key if p.License_Id else "",
+            ])
+        return response
+
+    def get(self, request, *args, **kwargs):
+        return self._export_csv(request.query_params)
+
+    def post(self, request, *args, **kwargs):
+        return self._export_csv(request.data or {})
+
+
+# ========================================== Activations Screen =========================================== #
+
+def _apply_activation_record_scope(qs, params):
+    """Apply ProductCategory-style ORM filtering (all strings via icontains) on ActivationRecord."""
+    if not params:
+        return qs
+
+    if params.get("Activation_Id"):
+        qs = qs.filter(Activation_Id__icontains=str(params.get("Activation_Id")).strip())
+
+    if params.get("Activation_Code"):
+        qs = qs.filter(Activation_Code__icontains=str(params.get("Activation_Code")).strip())
+
+    product_val = params.get("Product_Id") or params.get("Product") or params.get("product_id")
+    if product_val and str(product_val).strip().lower() not in ("all", "all products"):
+        p_txt = str(product_val).strip()
+        if p_txt.isdigit():
+            qs = qs.filter(Product_Id_id=int(p_txt))
+        else:
+            qs = qs.filter(
+                Q(Product_Id__Product_Code__icontains=p_txt)
+                | Q(Product_Id__Product_Name__icontains=p_txt)
+                | Q(Product_Name__icontains=p_txt)
+            )
+
+    plan_edition_val = (
+        params.get("Plan_Edition")
+        or params.get("Plan_Id")
+        or params.get("Edition_Id")
+        or params.get("plan_id")
+    )
+    if plan_edition_val and str(plan_edition_val).strip().lower() not in ("all", "all plans", "all editions"):
+        pe_txt = str(plan_edition_val).strip()
+        if pe_txt.isdigit():
+            qs = qs.filter(Q(Plan_Id_id=int(pe_txt)) | Q(Edition_Id_id=int(pe_txt)))
+        else:
+            qs = qs.filter(
+                Q(Plan_Edition_Name__icontains=pe_txt)
+                | Q(Plan_Id__Plan_Name__icontains=pe_txt)
+                | Q(Plan_Id__Plan_Id__icontains=pe_txt)
+                | Q(Edition_Id__Edition_Name__icontains=pe_txt)
+                | Q(Edition_Id__Edition_Code__icontains=pe_txt)
+            )
+
+    customer_val = params.get("Customer_Id") or params.get("Tenant") or params.get("customer_id")
+    if customer_val and str(customer_val).strip().lower() not in ("all", "all tenants", "all customers"):
+        c_txt = str(customer_val).strip()
+        if c_txt.isdigit():
+            qs = qs.filter(Customer_Id_id=int(c_txt))
+        else:
+            qs = qs.filter(
+                Q(Customer_Id__Organization_Name__icontains=c_txt)
+                | Q(Customer_Id__Contact_Name__icontains=c_txt)
+                | Q(Customer_Id__Account_Id__icontains=c_txt)
+                | Q(Customer_Name__icontains=c_txt)
+            )
+
+    status_val = params.get("Activation_Status") or params.get("Status") or params.get("status")
+    if status_val and str(status_val).strip().lower() not in ("all", "all status", "all statuses"):
+        s_txt = str(status_val).strip()
+        if "expiring" in s_txt.lower():
+            today = timezone.localdate()
+            qs = qs.filter(
+                Valid_To__gte=today,
+                Valid_To__lte=today + timedelta(days=30),
+                Status__icontains="Active",
+            )
+        else:
+            qs = qs.filter(Status__icontains=s_txt)
+
+    if params.get("License_Key"):
+        lk_txt = str(params.get("License_Key")).strip()
+        qs = qs.filter(Q(License_Key__icontains=lk_txt) | Q(License_Id__License_Key__icontains=lk_txt))
+
+    is_active = _parse_bool_flag(params.get("Is_Active"))
+    if is_active is not None:
+        qs = qs.filter(Is_Active=is_active)
+
+    if params.get("Organization_Id") and str(params.get("Organization_Id")).isdigit():
+        qs = qs.filter(Organization_Id_id=int(params.get("Organization_Id")))
+
+    if params.get("Created_By") and str(params.get("Created_By")).isdigit():
+        qs = qs.filter(Created_By_id=int(params.get("Created_By")))
+
+    from_date = params.get("fromdate") or params.get("from_date") or params.get("From_Date")
+    to_date = params.get("todate") or params.get("to_date") or params.get("To_Date")
+    if from_date and to_date:
+        qs = qs.filter(Activated_On__date__range=[str(from_date).split("T")[0], str(to_date).split("T")[0]])
+    elif from_date:
+        qs = qs.filter(Activated_On__date__gte=str(from_date).split("T")[0])
+    elif to_date:
+        qs = qs.filter(Activated_On__date__lte=str(to_date).split("T")[0])
+
+    search = params.get("search")
+    if search:
+        term = str(search).strip()
+        qs = qs.filter(
+            Q(Activation_Id__icontains=term)
+            | Q(Activation_Code__icontains=term)
+            | Q(Customer_Name__icontains=term)
+            | Q(Customer_Id__Organization_Name__icontains=term)
+            | Q(Customer_Id__Contact_Name__icontains=term)
+            | Q(Product_Name__icontains=term)
+            | Q(Product_Id__Product_Name__icontains=term)
+            | Q(Plan_Edition_Name__icontains=term)
+            | Q(License_Key__icontains=term)
+            | Q(License_Id__License_Key__icontains=term)
+            | Q(Purchase_Id__Purchase_Id__icontains=term)
+            | Q(Status__icontains=term)
+        )
+
+    return qs
+
+
+class ActivationRecordCRUD(_ProductCategoryStyleCRUDView):
+    model_cls = ActivationRecord
+    serializer_cls = ActivationRecordSerializer
+    code_fields = ("Activation_Id", "Activation_Code")
+    entity_label = "ActivationRecord"
+    select_related_fields = ("Purchase_Id", "Customer_Id", "Product_Id", "Plan_Id", "Edition_Id", "License_Id", "Subscription_Id")
+    prefetch_related_fields = ("Allocated_Addons",)
+
+
+class ActivationRecordListwithPagination(ListAPIView):
+    queryset = ActivationRecord.objects.all()
+    serializer_class = ActivationRecordSerializer
+
+    def get_queryset(self):
+        qs = (
+            ActivationRecord.objects.filter(Q(Is_Deleted=False))
+            .select_related("Purchase_Id", "Customer_Id", "Product_Id", "Plan_Id", "Edition_Id", "License_Id", "Subscription_Id")
+            .prefetch_related("Allocated_Addons")
+            .order_by("-id")
+        )
+        return _apply_activation_record_scope(qs, self.request.query_params)
+
+
+class ActivationRecordSearch(ListAPIView):
+    queryset = ActivationRecord.objects.all()
+    serializer_class = ActivationRecordSerializer
+
+    def get_queryset(self):
+        qs = (
+            ActivationRecord.objects.filter(Is_Deleted=False)
+            .select_related("Purchase_Id", "Customer_Id", "Product_Id", "Plan_Id", "Edition_Id", "License_Id", "Subscription_Id")
+            .prefetch_related("Allocated_Addons")
+            .order_by("-id")
+        )
+        return _apply_activation_record_scope(qs, self.request.GET)
+
+
+class ActivationRecordlistwithoutpaginaton(APIView):
+    def get(self, request, *args, **kwargs):
+        try:
+            qs = (
+                ActivationRecord.objects.filter(Is_Deleted=False)
+                .select_related("Purchase_Id", "Customer_Id", "Product_Id", "Plan_Id", "Edition_Id", "License_Id", "Subscription_Id")
+                .prefetch_related("Allocated_Addons")
+                .order_by("-id")
+            )
+            qs = _apply_activation_record_scope(qs, request.query_params)
+            return HttpResponse(JSONRenderer().render(ActivationRecordSerializer(qs, many=True).data), content_type="application/json", status=status.HTTP_200_OK)
+        except Exception as e:
+            return HttpResponse(JSONRenderer().render({"Error": str(e)}), content_type="application/json", status=status.HTTP_400_BAD_REQUEST)
+
+
+class ActivationRecordFilter(ListAPIView):
+    queryset = ActivationRecord.objects.all()
+    serializer_class = ActivationRecordSerializer
+
+    def post(self, request, *args, **kwargs):
+        try:
+            data = request.data or {}
+            qs = (
+                ActivationRecord.objects.filter(Is_Deleted=False)
+                .select_related("Purchase_Id", "Customer_Id", "Product_Id", "Plan_Id", "Edition_Id", "License_Id", "Subscription_Id")
+                .prefetch_related("Allocated_Addons")
+                .order_by("-id")
+            )
+            qs = _apply_activation_record_scope(qs, data)
+            return _paginate_queryset(qs, ActivationRecordSerializer, page=data.get("page", 1), page_size=data.get("page_size"))
+        except Exception as e:
+            return HttpResponse(JSONRenderer().render({"Error": str(e)}), content_type="application/json", status=status.HTTP_400_BAD_REQUEST)
+
+
+class ActivationRecordKPIAPI(APIView):
+    """Returns 6 KPI cards for Activations: Total Activations, Active, Pending, Failed, Renewed, Expiring (30 Days)."""
+
+    def _build_kpi_response(self, params):
+        today = timezone.localdate()
+        expiring_cutoff = today + timedelta(days=30)
+
+        qs = _apply_activation_record_scope(ActivationRecord.objects.filter(Is_Deleted=False), params)
+        total_activations = qs.count()
+        active_count = qs.filter(Status__icontains="Active").count()
+        pending_count = qs.filter(Status__icontains="Pending").count()
+        failed_count = qs.filter(Status__icontains="Failed").count()
+        renewed_count = qs.filter(Renewal_Count__gt=0).count()
+        expiring_30_days_count = qs.filter(
+            Valid_To__gte=today,
+            Valid_To__lte=expiring_cutoff,
+            Status__icontains="Active",
+        ).count()
+
+        status_breakdown = {
+            (row["Status"] or "Active"): row["count"]
+            for row in qs.values("Status").annotate(count=Count("id"))
+        }
+
+        payload = {
+            "status": True,
+            "total_activations": total_activations,
+            "active_count": active_count,
+            "pending_count": pending_count,
+            "failed_count": failed_count,
+            "renewed_count": renewed_count,
+            "expiring_30_days_count": expiring_30_days_count,
+            "status_breakdown": status_breakdown,
+            "cards": [
+                {"key": "total_activations", "label": "Total Activations", "value": total_activations},
+                {"key": "active_count", "label": "Active", "value": active_count},
+                {"key": "pending_count", "label": "Pending", "value": pending_count},
+                {"key": "failed_count", "label": "Failed", "value": failed_count},
+                {"key": "renewed_count", "label": "Renewed", "value": renewed_count},
+                {"key": "expiring_30_days_count", "label": "Expiring (30 Days)", "value": expiring_30_days_count},
+            ],
+        }
+        return HttpResponse(JSONRenderer().render(payload), content_type="application/json", status=status.HTTP_200_OK)
+
+    def get(self, request, *args, **kwargs):
+        try:
+            return self._build_kpi_response(request.query_params)
+        except Exception as e:
+            return HttpResponse(JSONRenderer().render({"Error": str(e)}), content_type="application/json", status=status.HTTP_400_BAD_REQUEST)
+
+    def post(self, request, *args, **kwargs):
+        try:
+            return self._build_kpi_response(request.data or {})
+        except Exception as e:
+            return HttpResponse(JSONRenderer().render({"Error": str(e)}), content_type="application/json", status=status.HTTP_400_BAD_REQUEST)
+
+
+class ActivationRecordActionAPI(APIView):
+    """Handles Deactivate, Revoke, Renew, Activate, and Edit Activation actions."""
+
+    @transaction.atomic
+    def post(self, request, *args, **kwargs):
+        try:
+            data = request.data or {}
+            action = str(data.get("action") or "").strip().lower()
+            if not action:
+                raise Exception("action is required (deactivate, revoke, renew, activate, edit_activation)")
+
+            qs = ActivationRecord.objects.filter(Is_Deleted=False)
+            if data.get("id"):
+                rec = qs.get(id=data.get("id"))
+            elif data.get("Activation_Id"):
+                rec = qs.filter(Activation_Id__icontains=str(data.get("Activation_Id")).strip()).order_by("id").first()
+            elif data.get("Activation_Code"):
+                rec = qs.filter(Activation_Code__icontains=str(data.get("Activation_Code")).strip()).order_by("id").first()
+            else:
+                raise Exception("id, Activation_Id, or Activation_Code is required")
+
+            if rec is None:
+                raise ActivationRecord.DoesNotExist("ActivationRecord not found")
+
+            now_iso = timezone.now().isoformat()
+            if action == "deactivate":
+                rec.Status = "Deactivated"
+                rec.Is_Active = False
+                rec.save()
+            elif action == "revoke":
+                rec.Status = "Revoked"
+                rec.Is_Active = False
+                rec.save()
+                if rec.License_Id:
+                    rec.License_Id.Status = "Revoked"
+                    rec.License_Id.Is_Active = False
+                    rec.License_Id.save()
+            elif action == "activate":
+                rec.Status = "Active"
+                rec.Is_Active = True
+                if not rec.Activated_On:
+                    rec.Activated_On = timezone.now()
+                rec.Activation_Timeline = rec.build_default_timeline()
+                rec.save()
+            elif action == "renew":
+                prev_to = rec.Valid_To or timezone.localdate()
+                new_to_raw = data.get("new_valid_to") or data.get("Valid_To")
+                if new_to_raw:
+                    new_to = DT.date.fromisoformat(str(new_to_raw).split("T")[0])
+                else:
+                    new_to = prev_to + timedelta(days=int(data.get("extend_days") or 365))
+                rec.Valid_To = new_to
+                rec.Renewal_Count = int(rec.Renewal_Count or 0) + 1
+                rec.Status = "Active"
+                rec.Is_Active = True
+                timeline = list(rec.Activation_Timeline or [])
+                timeline.append({"step": f"Renewed Until {new_to.isoformat()}", "status": "completed", "timestamp": now_iso})
+                rec.Activation_Timeline = timeline
+                rec.save()
+                if rec.License_Id:
+                    rec.License_Id.Valid_To = new_to
+                    rec.License_Id.Status = "Active"
+                    rec.License_Id.Is_Active = True
+                    rec.License_Id.save()
+            elif action == "edit_activation":
+                ser = ActivationRecordSerializer(instance=rec, data=data, partial=True)
+                if not ser.is_valid():
+                    return HttpResponse(JSONRenderer().render(ser.errors), content_type="application/json", status=status.HTTP_400_BAD_REQUEST)
+                rec = ser.save()
+            else:
+                raise Exception(f"Unsupported action: {action}")
+
+            rec.refresh_from_db()
+            return HttpResponse(
+                JSONRenderer().render({"status": True, "action": action, "data": ActivationRecordSerializer(rec).data}),
+                content_type="application/json",
+                status=status.HTTP_200_OK,
+            )
+        except Exception as e:
+            return HttpResponse(JSONRenderer().render({"Error": str(e)}), content_type="application/json", status=status.HTTP_400_BAD_REQUEST)
+
+
+class ActivationRecordExportAPI(APIView):
+    """Exports filtered ActivationRecord rows to CSV."""
+
+    def _export_csv(self, params):
+        qs = (
+            ActivationRecord.objects.filter(Is_Deleted=False)
+            .select_related("Customer_Id", "Product_Id", "Plan_Id", "Edition_Id", "License_Id", "Purchase_Id")
+            .order_by("-id")
+        )
+        qs = _apply_activation_record_scope(qs, params)
+        response = HttpResponse(content_type="text/csv")
+        response["Content-Disposition"] = 'attachment; filename="activations_export.csv"'
+        writer = csv.writer(response)
+        writer.writerow([
+            "Activation ID", "Customer / Tenant", "Product", "Plan / Edition",
+            "License Key", "Activated On", "Valid From", "Valid To", "Status",
+        ])
+        for r in qs:
+            writer.writerow([
+                r.Activation_Id,
+                r.Customer_Name or (r.Customer_Id.Organization_Name if r.Customer_Id else ""),
+                r.Product_Name or (r.Product_Id.Product_Name if r.Product_Id else ""),
+                r.Plan_Edition_Name or "",
+                r.License_Key or (r.License_Id.License_Key if r.License_Id else ""),
+                r.Activated_On.isoformat() if r.Activated_On else "",
+                r.Valid_From.isoformat() if r.Valid_From else "",
+                r.Valid_To.isoformat() if r.Valid_To else "",
+                r.Status or "",
+            ])
+        return response
+
+    def get(self, request, *args, **kwargs):
+        return self._export_csv(request.query_params)
+
+    def post(self, request, *args, **kwargs):
+        return self._export_csv(request.data or {})
+
+
+# ========================================== Activation Queue Screen =========================================== #
+
+def _apply_activation_queue_scope(qs, params):
+    """Apply ProductCategory-style ORM filtering (all strings via icontains) on ActivationQueueRequest."""
+    if not params:
+        return qs
+
+    if params.get("Request_Id"):
+        qs = qs.filter(Request_Id__icontains=str(params.get("Request_Id")).strip())
+
+    if params.get("Request_Code"):
+        qs = qs.filter(Request_Code__icontains=str(params.get("Request_Code")).strip())
+
+    product_val = params.get("Product_Id") or params.get("Product") or params.get("product_id")
+    if product_val and str(product_val).strip().lower() not in ("all", "all products"):
+        p_txt = str(product_val).strip()
+        if p_txt.isdigit():
+            qs = qs.filter(Product_Id_id=int(p_txt))
+        else:
+            qs = qs.filter(
+                Q(Product_Id__Product_Code__icontains=p_txt)
+                | Q(Product_Id__Product_Name__icontains=p_txt)
+                | Q(Product_Name__icontains=p_txt)
+            )
+
+    req_type = params.get("Request_Type") or params.get("request_type")
+    if req_type and str(req_type).strip().lower() not in ("all", "all types"):
+        qs = qs.filter(Request_Type__icontains=str(req_type).strip())
+
+    customer_val = params.get("Customer_Id") or params.get("Tenant") or params.get("customer_id")
+    if customer_val and str(customer_val).strip().lower() not in ("all", "all tenants", "all customers"):
+        c_txt = str(customer_val).strip()
+        if c_txt.isdigit():
+            qs = qs.filter(Customer_Id_id=int(c_txt))
+        else:
+            qs = qs.filter(
+                Q(Customer_Id__Organization_Name__icontains=c_txt)
+                | Q(Customer_Id__Contact_Name__icontains=c_txt)
+                | Q(Customer_Id__Account_Id__icontains=c_txt)
+                | Q(Customer_Name__icontains=c_txt)
+            )
+
+    plan_edition_val = (
+        params.get("Plan_Edition")
+        or params.get("Plan_Id")
+        or params.get("Edition_Id")
+        or params.get("plan_id")
+    )
+    if plan_edition_val and str(plan_edition_val).strip().lower() not in ("all", "all plans", "all editions"):
+        pe_txt = str(plan_edition_val).strip()
+        if pe_txt.isdigit():
+            qs = qs.filter(Q(Plan_Id_id=int(pe_txt)) | Q(Edition_Id_id=int(pe_txt)))
+        else:
+            qs = qs.filter(
+                Q(Plan_Edition_Name__icontains=pe_txt)
+                | Q(Plan_Id__Plan_Name__icontains=pe_txt)
+                | Q(Plan_Id__Plan_Id__icontains=pe_txt)
+                | Q(Edition_Id__Edition_Name__icontains=pe_txt)
+                | Q(Edition_Id__Edition_Code__icontains=pe_txt)
+            )
+
+    status_val = params.get("Status") or params.get("status")
+    if status_val and str(status_val).strip().lower() not in ("all", "all requests", "all status", "all statuses"):
+        qs = qs.filter(Status__icontains=str(status_val).strip())
+
+    priority_val = params.get("Priority") or params.get("priority")
+    if priority_val and str(priority_val).strip().lower() != "all":
+        qs = qs.filter(Priority__icontains=str(priority_val).strip())
+
+    is_active = _parse_bool_flag(params.get("Is_Active"))
+    if is_active is not None:
+        qs = qs.filter(Is_Active=is_active)
+
+    if params.get("Organization_Id") and str(params.get("Organization_Id")).isdigit():
+        qs = qs.filter(Organization_Id_id=int(params.get("Organization_Id")))
+
+    if params.get("Created_By") and str(params.get("Created_By")).isdigit():
+        qs = qs.filter(Created_By_id=int(params.get("Created_By")))
+
+    from_date = params.get("fromdate") or params.get("from_date") or params.get("From_Date")
+    to_date = params.get("todate") or params.get("to_date") or params.get("To_Date")
+    if from_date and to_date:
+        qs = qs.filter(Requested_On__date__range=[str(from_date).split("T")[0], str(to_date).split("T")[0]])
+    elif from_date:
+        qs = qs.filter(Requested_On__date__gte=str(from_date).split("T")[0])
+    elif to_date:
+        qs = qs.filter(Requested_On__date__lte=str(to_date).split("T")[0])
+
+    search = params.get("search")
+    if search:
+        term = str(search).strip()
+        qs = qs.filter(
+            Q(Request_Id__icontains=term)
+            | Q(Request_Code__icontains=term)
+            | Q(Customer_Name__icontains=term)
+            | Q(Customer_Id__Organization_Name__icontains=term)
+            | Q(Customer_Id__Contact_Name__icontains=term)
+            | Q(Product_Name__icontains=term)
+            | Q(Product_Id__Product_Name__icontains=term)
+            | Q(Plan_Edition_Name__icontains=term)
+            | Q(Request_Type__icontains=term)
+            | Q(Requested_By__icontains=term)
+            | Q(Priority__icontains=term)
+            | Q(Status__icontains=term)
+        )
+
+    return qs
+
+
+class ActivationQueueRequestCRUD(_ProductCategoryStyleCRUDView):
+    model_cls = ActivationQueueRequest
+    serializer_cls = ActivationQueueRequestSerializer
+    code_fields = ("Request_Id", "Request_Code")
+    entity_label = "ActivationQueueRequest"
+    select_related_fields = ("Purchase_Id", "Activation_Id", "Customer_Id", "Product_Id", "Plan_Id", "Edition_Id", "License_Id", "Assigned_Reviewer")
+
+
+class ActivationQueueRequestListwithPagination(ListAPIView):
+    queryset = ActivationQueueRequest.objects.all()
+    serializer_class = ActivationQueueRequestSerializer
+
+    def get_queryset(self):
+        qs = (
+            ActivationQueueRequest.objects.filter(Q(Is_Deleted=False))
+            .select_related("Purchase_Id", "Activation_Id", "Customer_Id", "Product_Id", "Plan_Id", "Edition_Id", "License_Id", "Assigned_Reviewer")
+            .order_by("-id")
+        )
+        return _apply_activation_queue_scope(qs, self.request.query_params)
+
+
+class ActivationQueueRequestSearch(ListAPIView):
+    queryset = ActivationQueueRequest.objects.all()
+    serializer_class = ActivationQueueRequestSerializer
+
+    def get_queryset(self):
+        qs = (
+            ActivationQueueRequest.objects.filter(Is_Deleted=False)
+            .select_related("Purchase_Id", "Activation_Id", "Customer_Id", "Product_Id", "Plan_Id", "Edition_Id", "License_Id", "Assigned_Reviewer")
+            .order_by("-id")
+        )
+        return _apply_activation_queue_scope(qs, self.request.GET)
+
+
+class ActivationQueueRequestlistwithoutpaginaton(APIView):
+    def get(self, request, *args, **kwargs):
+        try:
+            qs = (
+                ActivationQueueRequest.objects.filter(Is_Deleted=False)
+                .select_related("Purchase_Id", "Activation_Id", "Customer_Id", "Product_Id", "Plan_Id", "Edition_Id", "License_Id", "Assigned_Reviewer")
+                .order_by("-id")
+            )
+            qs = _apply_activation_queue_scope(qs, request.query_params)
+            return HttpResponse(JSONRenderer().render(ActivationQueueRequestSerializer(qs, many=True).data), content_type="application/json", status=status.HTTP_200_OK)
+        except Exception as e:
+            return HttpResponse(JSONRenderer().render({"Error": str(e)}), content_type="application/json", status=status.HTTP_400_BAD_REQUEST)
+
+
+class ActivationQueueRequestFilter(ListAPIView):
+    queryset = ActivationQueueRequest.objects.all()
+    serializer_class = ActivationQueueRequestSerializer
+
+    def post(self, request, *args, **kwargs):
+        try:
+            data = request.data or {}
+            qs = (
+                ActivationQueueRequest.objects.filter(Is_Deleted=False)
+                .select_related("Purchase_Id", "Activation_Id", "Customer_Id", "Product_Id", "Plan_Id", "Edition_Id", "License_Id", "Assigned_Reviewer")
+                .order_by("-id")
+            )
+            qs = _apply_activation_queue_scope(qs, data)
+            return _paginate_queryset(qs, ActivationQueueRequestSerializer, page=data.get("page", 1), page_size=data.get("page_size"))
+        except Exception as e:
+            return HttpResponse(JSONRenderer().render({"Error": str(e)}), content_type="application/json", status=status.HTTP_400_BAD_REQUEST)
+
+
+class ActivationQueueRequestKPIAPI(APIView):
+    """Returns 5 KPI cards + status sub-tab counts for Activation Queue."""
+
+    def _build_kpi_response(self, params):
+        from django.db.models import Avg
+
+        base_params = {k: v for k, v in dict(params).items() if str(k).lower() != "status"}
+        qs = _apply_activation_queue_scope(ActivationQueueRequest.objects.filter(Is_Deleted=False), base_params)
+        today = timezone.localdate()
+
+        total_requests = qs.count()
+        pending_count = qs.filter(Status__icontains="Pending").count()
+        in_review_count = qs.filter(Status__icontains="In Review").count()
+        pending_review_count = qs.filter(Q(Status__icontains="Pending") | Q(Status__icontains="In Review")).count()
+        approved_today_count = qs.filter(
+            Status__icontains="Approved",
+        ).filter(Q(Processed_At__date=today) | Q(Processed_At__isnull=True, Updated_Date__date=today)).count()
+        approved_total_count = qs.filter(Status__icontains="Approved").count()
+        rejected_count = qs.filter(Status__icontains="Rejected").count()
+
+        avg_mins_val = qs.filter(Processing_Time_Minutes__isnull=False).aggregate(avg_m=Avg("Processing_Time_Minutes")).get("avg_m")
+        avg_processing_time_mins = int(round(float(avg_mins_val))) if avg_mins_val is not None else 0
+
+        payload = {
+            "status": True,
+            "total_requests": total_requests,
+            "pending_review_count": pending_review_count,
+            "approved_today_count": approved_today_count,
+            "rejected_count": rejected_count,
+            "avg_processing_time_mins": avg_processing_time_mins,
+            "avg_processing_time_label": f"{avg_processing_time_mins} mins",
+            "tab_counts": {
+                "all_requests": total_requests,
+                "pending": pending_count,
+                "in_review": in_review_count,
+                "approved": approved_total_count,
+                "rejected": rejected_count,
+            },
+            "cards": [
+                {"key": "total_requests", "label": "Total Requests", "value": total_requests},
+                {"key": "pending_review_count", "label": "Pending Review", "value": pending_review_count},
+                {"key": "approved_today_count", "label": "Approved (Today)", "value": approved_today_count},
+                {"key": "rejected_count", "label": "Rejected", "value": rejected_count},
+                {"key": "avg_processing_time_mins", "label": "Avg. Processing Time", "value": f"{avg_processing_time_mins} mins", "raw_value": avg_processing_time_mins},
+            ],
+        }
+        return HttpResponse(JSONRenderer().render(payload), content_type="application/json", status=status.HTTP_200_OK)
+
+    def get(self, request, *args, **kwargs):
+        try:
+            return self._build_kpi_response(request.query_params)
+        except Exception as e:
+            return HttpResponse(JSONRenderer().render({"Error": str(e)}), content_type="application/json", status=status.HTTP_400_BAD_REQUEST)
+
+    def post(self, request, *args, **kwargs):
+        try:
+            return self._build_kpi_response(request.data or {})
+        except Exception as e:
+            return HttpResponse(JSONRenderer().render({"Error": str(e)}), content_type="application/json", status=status.HTTP_400_BAD_REQUEST)
+
+
+class ActivationQueueActionAPI(APIView):
+    """Handles Approve & Activate, Reject, and Move to Review actions on ActivationQueueRequest."""
+
+    @transaction.atomic
+    def post(self, request, *args, **kwargs):
+        try:
+            data = request.data or {}
+            action = str(data.get("action") or "").strip().lower()
+            if not action:
+                raise Exception("action is required (approve_activate, reject, move_to_review)")
+
+            qs = ActivationQueueRequest.objects.filter(Is_Deleted=False)
+            if data.get("id"):
+                q_req = qs.get(id=data.get("id"))
+            elif data.get("Request_Id"):
+                q_req = qs.filter(Request_Id__icontains=str(data.get("Request_Id")).strip()).order_by("id").first()
+            elif data.get("Request_Code"):
+                q_req = qs.filter(Request_Code__icontains=str(data.get("Request_Code")).strip()).order_by("id").first()
+            else:
+                raise Exception("id, Request_Id, or Request_Code is required")
+
+            if q_req is None:
+                raise ActivationQueueRequest.DoesNotExist("ActivationQueueRequest not found")
+
+            now_dt = timezone.now()
+            if action == "move_to_review":
+                q_req.Status = "In Review"
+                q_req.Reviewed_At = now_dt
+                if data.get("reviewer_id") and str(data.get("reviewer_id")).isdigit():
+                    q_req.Assigned_Reviewer_id = int(data.get("reviewer_id"))
+                q_req.Activation_Process = q_req.build_default_process()
+                q_req.save()
+
+            elif action == "reject":
+                q_req.Status = "Rejected"
+                q_req.Processed_At = now_dt
+                q_req.Rejection_Reason = data.get("reason") or data.get("Rejection_Reason") or q_req.Rejection_Reason
+                if q_req.Requested_On:
+                    q_req.Processing_Time_Minutes = int(round(max(0, (now_dt - q_req.Requested_On).total_seconds()) / 60.0))
+                q_req.Activation_Process = q_req.build_default_process()
+                q_req.save()
+
+            elif action in ("approve_activate", "approve"):
+                q_req.Status = "Approved"
+                if not q_req.Reviewed_At:
+                    q_req.Reviewed_At = now_dt
+                q_req.Processed_At = now_dt
+                if q_req.Requested_On:
+                    q_req.Processing_Time_Minutes = int(round(max(0, (now_dt - q_req.Requested_On).total_seconds()) / 60.0))
+
+                # Auto-provision LicenseMaster + ActivationRecord when approving
+                lic = q_req.License_Id
+                if not lic:
+                    valid_from = timezone.localdate()
+                    valid_to = valid_from + timedelta(days=365)
+                    lic = LicenseMaster.objects.create(
+                        Organization_Id=q_req.Organization_Id,
+                        Customer_Id=q_req.Customer_Id,
+                        Customer_Name=q_req.Customer_Name,
+                        Product_Id=q_req.Product_Id,
+                        Product_Name=q_req.Product_Name,
+                        Plan_Id=q_req.Plan_Id,
+                        ProductEdition_id=q_req.Edition_Id,
+                        Plan_Edition_Name=q_req.Plan_Edition_Name,
+                        License_Type=q_req.Request_Type or "Subscription",
+                        Valid_From=valid_from,
+                        Valid_To=valid_to,
+                        Activated_On=valid_from,
+                        Status="Active",
+                        Created_By=q_req.Updated_By or q_req.Created_By,
+                        Updated_By=q_req.Updated_By or q_req.Created_By,
+                    )
+                    q_req.License_Id = lic
+
+                act = q_req.Activation_Id
+                if not act:
+                    act = ActivationRecord.objects.create(
+                        Organization_Id=q_req.Organization_Id,
+                        Purchase_Id=q_req.Purchase_Id,
+                        Customer_Id=q_req.Customer_Id,
+                        Customer_Name=q_req.Customer_Name,
+                        Product_Id=q_req.Product_Id,
+                        Product_Name=q_req.Product_Name,
+                        Plan_Id=q_req.Plan_Id,
+                        Edition_Id=q_req.Edition_Id,
+                        Plan_Edition_Name=q_req.Plan_Edition_Name,
+                        License_Id=lic,
+                        License_Key=getattr(lic, "License_Key", None),
+                        Activated_On=now_dt,
+                        Valid_From=getattr(lic, "Valid_From", timezone.localdate()),
+                        Valid_To=getattr(lic, "Valid_To", None),
+                        Status="Active",
+                        Created_By=q_req.Updated_By or q_req.Created_By,
+                        Updated_By=q_req.Updated_By or q_req.Created_By,
+                    )
+                    q_req.Activation_Id = act
+
+                if q_req.Purchase_Id:
+                    pur = q_req.Purchase_Id
+                    pur.Activation_Status = "Activated"
+                    pur.Activation_Date = now_dt
+                    pur.License_Id = lic
+                    pur.Activation_Timeline = pur.build_default_timeline()
+                    pur.save()
+
+                q_req.Activation_Process = q_req.build_default_process()
+                q_req.save()
+
+            else:
+                raise Exception(f"Unsupported action: {action}")
+
+            q_req.refresh_from_db()
+            return HttpResponse(
+                JSONRenderer().render({"status": True, "action": action, "data": ActivationQueueRequestSerializer(q_req).data}),
+                content_type="application/json",
+                status=status.HTTP_200_OK,
+            )
+        except Exception as e:
+            return HttpResponse(JSONRenderer().render({"Error": str(e)}), content_type="application/json", status=status.HTTP_400_BAD_REQUEST)
+
+
+class ActivationQueueExportAPI(APIView):
+    """Exports filtered ActivationQueueRequest rows to CSV."""
+
+    def _export_csv(self, params):
+        qs = (
+            ActivationQueueRequest.objects.filter(Is_Deleted=False)
+            .select_related("Customer_Id", "Product_Id", "Plan_Id", "Edition_Id")
+            .order_by("-id")
+        )
+        qs = _apply_activation_queue_scope(qs, params)
+        response = HttpResponse(content_type="text/csv")
+        response["Content-Disposition"] = 'attachment; filename="activation_queue_export.csv"'
+        writer = csv.writer(response)
+        writer.writerow([
+            "Request ID", "Customer / Tenant", "Product", "Plan / Edition",
+            "Request Type", "Requested On", "Requested By", "Status", "Priority",
+        ])
+        for q in qs:
+            writer.writerow([
+                q.Request_Id,
+                q.Customer_Name or (q.Customer_Id.Organization_Name if q.Customer_Id else ""),
+                q.Product_Name or (q.Product_Id.Product_Name if q.Product_Id else ""),
+                q.Plan_Edition_Name or "",
+                q.Request_Type or "",
+                q.Requested_On.isoformat() if q.Requested_On else "",
+                q.Requested_By or "",
+                q.Status or "",
+                q.Priority or "",
+            ])
+        return response
+
+    def get(self, request, *args, **kwargs):
+        return self._export_csv(request.query_params)
+
+    def post(self, request, *args, **kwargs):
+        return self._export_csv(request.data or {})
+
+
 
