@@ -4,6 +4,8 @@ import json
 import os
 import subprocess
 
+from decimal import Decimal
+
 from django.conf import settings
 from django.core.files.base import ContentFile
 from django.core.files.storage import default_storage
@@ -8109,5 +8111,1082 @@ class PartnerMailConfigurationTestConnection(APIView):
                 {"Error": str(error)},
                 status.HTTP_400_BAD_REQUEST
             )
+
+
+
+
+
+
+# ==================== PARTNER COMMISSION UTILS ====================
+# create_partner_commission / calculate_invoice_commissions / mark_invoice_payment_received
+# can be imported from this views.py into your Sales Order / Invoice flow.
+
+DEFAULT_COMMISSION_PERCENTAGE = {
+    'Implementation': Decimal('80.00'),
+    'Product': Decimal('20.00'),
+    'Extension': Decimal('20.00'),
+}
+
+COMMISSION_TYPE_LIST = ['Implementation', 'Product', 'Extension']
+ACTIVE_INVOICE_STATUS = ['Submitted', 'Under Review', 'Approved']   # blocks a new invoice
+INVOICE_ALLOWED_STATUS = ['Eligible', 'Rejected']                   # partner can raise invoice
+
+
+def round_amount(value):
+    return Decimal(value or 0).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+
+
+def get_active_commission_rule(commission_type):
+    today = timezone.now().date()
+    return PartnerCommissionRule.objects.filter(
+        Commission_Type=commission_type,
+        Is_Active=True,
+        Is_Deleted=False,
+        Effective_From__lte=today,
+    ).filter(
+        Q(Effective_To__isnull=True) | Q(Effective_To__gte=today)
+    ).order_by('-Effective_From', '-id').first()
+
+
+def calculate_commission(commission_type, sales_order_value):
+    rule = get_active_commission_rule(commission_type)
+    if rule and rule.Commission_Percentage is not None:
+        percentage = Decimal(rule.Commission_Percentage)
+    else:
+        percentage = DEFAULT_COMMISSION_PERCENTAGE.get(commission_type, Decimal('0.00'))
+    amount = round_amount(Decimal(sales_order_value or 0) * percentage / Decimal('100'))
+    return rule, percentage, amount
+
+
+def check_invoice_eligibility(commission):
+    # Implementation      -> implementation completed + customer sign-off
+    # Product / Extension -> customer payment received by Foyer
+    if commission.Commission_Type == 'Implementation':
+        if not commission.Implementation_Completed:
+            return False, 'Waiting for implementation completion'
+        if not commission.Customer_Signoff_Received:
+            return False, 'Waiting for customer sign-off'
+        return True, 'Eligible to raise invoice'
+
+    if commission.Commission_Type in ['Product', 'Extension']:
+        if not commission.Customer_Payment_Received:
+            return False, 'Waiting for customer payment'
+        return True, 'Eligible to raise invoice'
+
+    return False, 'Invalid commission type'
+
+
+def refresh_commission_eligibility(commission):
+    # Only moves Pending <-> Eligible. Once invoice is submitted, status is not touched here.
+    if commission.Commission_Status not in ['Pending', 'Eligible']:
+        return commission
+
+    is_eligible, _ = check_invoice_eligibility(commission)
+    if is_eligible:
+        commission.Eligibility_Status = 'Eligible'
+        commission.Commission_Status = 'Eligible'
+        if not commission.Eligible_Date:
+            commission.Eligible_Date = timezone.now()
+    else:
+        commission.Eligibility_Status = 'Not Eligible'
+        commission.Commission_Status = 'Pending'
+        commission.Eligible_Date = None
+
+    commission.Updated_Date = timezone.now()
+    commission.save()
+    return commission
+
+
+def create_partner_commission(Partner_Id, Commission_Type, Sales_Order_Value, Customer_Id=None,
+                              Invoice_Id=None, InstanceRequest_Id=None, Product_Id=None):
+    # Pass model objects, e.g. Partner_Id=partner_obj, Customer_Id=account_obj
+    rule, percentage, amount = calculate_commission(Commission_Type, Sales_Order_Value)
+    commission = PartnerCommission.objects.create(
+        Partner_Id=Partner_Id,
+        Customer_Id=Customer_Id,
+        Invoice_Id=Invoice_Id,
+        InstanceRequest_Id=InstanceRequest_Id,
+        Product_Id=Product_Id,
+        Rule_Id=rule,
+        Commission_Type=Commission_Type,
+        Sales_Order_Value=round_amount(Sales_Order_Value),
+        Commission_Percentage=percentage,
+        Commission_Amount=amount,
+        Eligibility_Status='Not Eligible',
+        Commission_Status='Pending',
+    )
+    return refresh_commission_eligibility(commission)
+
+
+def calculate_invoice_commissions(invoice, partner, customer, items, instance_request=None, save=True):
+    """
+    Called when Super Admin creates the customer's Invoice (customer requested product / implementation).
+    items = [{"Commission_Type": "Implementation", "Amount": 100000},
+             {"Commission_Type": "Product", "Product_Id": 3, "Amount": 50000}]
+    Amount = implementation value / product value from the sales order (NOT the full invoice total).
+    save=False -> only calculate (preview), nothing stored.
+    Same Invoice + Commission_Type + Product again -> updates the existing row (no duplicates),
+    unless an invoice is already raised on it.
+    """
+    results = []
+    for item in items:
+        commission_type = item.get('Commission_Type')
+        amount_value = round_amount(item.get('Amount'))
+        product = ProductMaster.objects.filter(id=item.get('Product_Id')).first() if item.get('Product_Id') else None
+        rule, percentage, amount = calculate_commission(commission_type, amount_value)
+
+        row = {
+            'Commission_Type': commission_type,
+            'Product_Id': product.id if product else None,
+            'Sales_Order_Value': str(amount_value),
+            'Commission_Percentage': str(percentage),
+            'Commission_Amount': str(amount),
+            'Rule_Id': rule.id if rule else None,
+            'Action': 'Calculated',
+        }
+
+        if save:
+            existing = PartnerCommission.objects.filter(
+                Invoice_Id=invoice, Commission_Type=commission_type, Product_Id=product, Is_Deleted=False).first()
+
+            if existing and existing.Commission_Status not in ['Pending', 'Eligible']:
+                row['Action'] = 'Skipped'
+                row['Message'] = f'Commission already {existing.Commission_Status}, not recalculated'
+                commission = existing
+            elif existing:
+                existing.Partner_Id = partner
+                existing.Customer_Id = customer
+                existing.InstanceRequest_Id = instance_request
+                existing.Rule_Id = rule
+                existing.Sales_Order_Value = amount_value
+                existing.Commission_Percentage = percentage
+                existing.Commission_Amount = amount
+                existing.save()
+                commission = refresh_commission_eligibility(existing)
+                row['Action'] = 'Updated'
+            else:
+                commission = create_partner_commission(
+                    Partner_Id=partner, Commission_Type=commission_type, Sales_Order_Value=amount_value,
+                    Customer_Id=customer, Invoice_Id=invoice, InstanceRequest_Id=instance_request, Product_Id=product)
+                row['Action'] = 'Created'
+
+            row['id'] = commission.id
+            row['PartnerCommission_id'] = commission.PartnerCommission_id
+            row['Commission_Status'] = commission.Commission_Status
+
+        results.append(row)
+    return results
+
+def validate_commission_payload(partner_id, customer_id, items, instance_request_id=None):
+    """
+    Checks Partner / Customer / Items before anything is saved.
+    Returns (partner, customer, instance_request, items). Raises ValueError with a clear message.
+    Used by PartnerCommissionCalculate and by InvoiceCRUD.post.
+    """
+    partner = Partner.objects.filter(id=partner_id).first() if partner_id else None
+    if not partner:
+        raise ValueError("Commission: Partner not found")
+    customer = Account.objects.filter(id=customer_id).first() if customer_id else None
+    if not customer:
+        raise ValueError("Commission: Customer not found")
+    instance_request = InstanceRequest.objects.filter(id=instance_request_id).first() if instance_request_id else None
+
+    if isinstance(items, str):
+        items = json.loads(items)          # form-data sends the list as a JSON string
+    if not isinstance(items, list) or not items:
+        raise ValueError("Commission: Items is required")
+
+    for index, item in enumerate(items, start=1):
+        if item.get('Commission_Type') not in COMMISSION_TYPE_LIST:
+            raise ValueError(f"Commission item {index}: Commission_Type must be one of {COMMISSION_TYPE_LIST}")
+        validate_amount(item.get('Amount'), f"Commission item {index}: Amount")
+        if item['Commission_Type'] in ['Product', 'Extension']:
+            if not item.get('Product_Id'):
+                raise ValueError(f"Commission item {index}: Product_Id is required for Product / Extension")
+            if not ProductMaster.objects.filter(id=item['Product_Id']).exists():
+                raise ValueError(f"Commission item {index}: Product not found")
+
+    return partner, customer, instance_request, items
+
+def mark_invoice_payment_received(invoice):
+    # Call from your customer Invoice payment flow when Foyer receives the payment.
+    # Product / Extension commissions of that invoice become Eligible.
+    commissions = PartnerCommission.objects.filter(
+        Invoice_Id=invoice, Commission_Type__in=['Product', 'Extension'],
+        Commission_Status='Pending', Is_Deleted=False)
+    for commission in commissions:
+        commission.Customer_Payment_Received = True
+        commission.save()
+        refresh_commission_eligibility(commission)
+    return commissions.count()
+
+
+def get_commission_invoice_info(commission):
+    # Extra fields shown on the Partner Portal for each commission row
+    status_message = {
+        'Invoice Submitted': 'Invoice submitted, awaiting approval',
+        'Approved': 'Invoice approved, awaiting payment',
+        'Paid': 'Commission paid',
+        'Rejected': 'Invoice rejected, you can submit a new invoice',
+    }
+    is_eligible, message = check_invoice_eligibility(commission)
+    active_invoice = commission.commission_invoices.filter(
+        Is_Deleted=False, Approval_Status__in=ACTIVE_INVOICE_STATUS).exists()
+
+    return {
+        'Can_Raise_Invoice': commission.Commission_Status in INVOICE_ALLOWED_STATUS and is_eligible and not active_invoice,
+        'Invoice_Eligibility_Message': status_message.get(commission.Commission_Status, message),
+    }
+
+
+def get_commission_summary(queryset):
+    # Dashboard cards
+    summary = {
+        'Total_Commission': Decimal('0.00'),
+        'Pending_Commission': Decimal('0.00'),
+        'Eligible_Commission': Decimal('0.00'),
+        'Invoice_Submitted': Decimal('0.00'),
+        'Approved_Commission': Decimal('0.00'),
+        'Rejected_Commission': Decimal('0.00'),
+        'Paid_Commission': Decimal('0.00'),
+        'Total_Count': 0,
+    }
+    status_key = {
+        'Pending': 'Pending_Commission',
+        'Eligible': 'Eligible_Commission',
+        'Invoice Submitted': 'Invoice_Submitted',
+        'Approved': 'Approved_Commission',
+        'Rejected': 'Rejected_Commission',
+        'Paid': 'Paid_Commission',
+    }
+    for row in queryset.values('Commission_Status', 'Commission_Amount'):
+        amount = Decimal(row['Commission_Amount'] or 0)
+        summary['Total_Commission'] += amount
+        summary['Total_Count'] += 1
+        key = status_key.get(row['Commission_Status'])
+        if key:
+            summary[key] += amount
+
+    return {k: (str(v) if isinstance(v, Decimal) else v) for k, v in summary.items()}
+
+
+def get_data(request):
+    # plain dict (safe with file uploads, request.data.copy() breaks on files)
+    return request.data.dict() if hasattr(request.data, 'dict') else dict(request.data)
+
+
+def error_response(message, code=status.HTTP_400_BAD_REQUEST):
+    output = JSONRenderer().render({"Error": message})
+    return HttpResponse(output, content_type='application/json', status=code)
+
+
+def commission_with_info(module):
+    # depth=1 data + Can_Raise_Invoice / Invoice_Eligibility_Message / Latest_Invoice
+    data = dict(PartnerCommissionSerializers(module).data)
+    data.update(get_commission_invoice_info(module))
+    latest_invoice = module.commission_invoices.filter(Is_Deleted=False).order_by('-id').first()
+    data['Latest_Invoice'] = PartnerCommissionInvoiceSerializer(latest_invoice).data if latest_invoice else None
+    return data
+
+
+def validate_percentage(value):
+    try:
+        percentage = Decimal(str(value))
+    except (InvalidOperation, TypeError):
+        raise ValueError("Commission_Percentage is required")
+    if percentage < 0 or percentage > 100:
+        raise ValueError("Commission_Percentage must be between 0 and 100")
+    return percentage
+
+
+def validate_amount(value, field):
+    try:
+        amount = Decimal(str(value))
+    except (InvalidOperation, TypeError):
+        raise ValueError(f"{field} is required")
+    if amount <= 0:
+        raise ValueError(f"{field} must be greater than 0")
+    return amount
+
+
+# Fields the client is never allowed to set directly on PartnerCommission
+COMMISSION_PROTECTED_FIELDS = ['Rule_Id', 'Commission_Percentage', 'Commission_Amount', 'Eligibility_Status',
+                               'Commission_Status', 'Eligible_Date', 'PartnerCommission_id', 'Is_Deleted']
+
+# Fields the partner is never allowed to set directly on PartnerCommissionInvoice
+INVOICE_PROTECTED_FIELDS = ['Approval_Status', 'Approved_By', 'Approved_Date', 'Rejection_Reason', 'Payment_Status',
+                            'Payment_Date', 'Payment_Reference_No', 'PartnerCommissionInvoice_id', 'Is_Deleted']
+
+
+# ==================== Partner Commission Rule ====================
+
+class PartnerCommissionRuleCRUD(APIView):
+    def post(self, request, *args, **kwargs):
+        try:
+            data = get_data(request)
+            if data.get('Commission_Type') not in COMMISSION_TYPE_LIST:
+                return error_response(f"Commission_Type must be one of {COMMISSION_TYPE_LIST}")
+            validate_percentage(data.get('Commission_Percentage'))
+            if data.get('Effective_From') and data.get('Effective_To') and str(data['Effective_To']) < str(data['Effective_From']):
+                return error_response("Effective_To cannot be before Effective_From")
+
+            data['Created_By'] = request.user.id if request.user.is_authenticated else None
+            data['Updated_By'] = data['Created_By']
+            serializer = PartnerCommissionRuleSerializer(data=data)
+            if serializer.is_valid():
+                serializer.save()
+                output = JSONRenderer().render(serializer.data)
+                return HttpResponse(output, content_type='application/json', status=status.HTTP_201_CREATED)
+            output = JSONRenderer().render(serializer.errors)
+            return HttpResponse(output, content_type='application/json', status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            return error_response(str(e))
+
+    def get(self, request, *args, **kwargs):
+        try:
+            data = request.query_params
+            id = data['id']
+            module = PartnerCommissionRule.objects.get(id=id)
+            serializer = PartnerCommissionRuleSerializers(module)
+            output = JSONRenderer().render(serializer.data)
+            return HttpResponse(output, content_type='application/json', status=status.HTTP_200_OK)
+        except Exception as e:
+            return error_response(str(e))
+
+    def put(self, request, *args, **kwargs):
+        try:
+            data = get_data(request)
+            id = data['id']
+            module = PartnerCommissionRule.objects.get(id=id)
+            if data.get('Commission_Type') and data['Commission_Type'] not in COMMISSION_TYPE_LIST:
+                return error_response(f"Commission_Type must be one of {COMMISSION_TYPE_LIST}")
+            if data.get('Commission_Percentage') not in [None, '']:
+                validate_percentage(data['Commission_Percentage'])
+
+            data['Updated_By'] = request.user.id if request.user.is_authenticated else None
+            data['Updated_Date'] = timezone.now()
+            serializer = PartnerCommissionRuleSerializer(instance=module, data=data, partial=True)
+            if serializer.is_valid():
+                serializer.save()
+                output = JSONRenderer().render(serializer.data)
+                return HttpResponse(output, content_type='application/json', status=status.HTTP_200_OK)
+            output = JSONRenderer().render(serializer.errors)
+            return HttpResponse(output, content_type='application/json', status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            return error_response(str(e))
+
+    def delete(self, request, *args, **kwargs):
+        try:
+            data = request.query_params
+            id = data['id']
+            module = PartnerCommissionRule.objects.get(id=id)
+            serializer = PartnerCommissionRuleSerializer(module, {"Is_Deleted": True, "Is_Active": False, "Updated_Date": timezone.now()}, partial=True)
+            if serializer.is_valid():
+                serializer.save()
+            output = JSONRenderer().render(serializer.data)
+            return HttpResponse(output, content_type='application/json', status=status.HTTP_200_OK)
+        except Exception as e:
+            return error_response(str(e))
+
+    def patch(self, request, *args, **kwargs):
+        try:
+            data = get_data(request)
+            if not data:
+                raise TypeError("Request data cannot be empty")
+            id = data.get('id')
+            module = PartnerCommissionRule.objects.get(id=id)
+            if data.get('Commission_Type') and data['Commission_Type'] not in COMMISSION_TYPE_LIST:
+                raise ValueError(f"Commission_Type must be one of {COMMISSION_TYPE_LIST}")
+            if data.get('Commission_Percentage') not in [None, '']:
+                validate_percentage(data['Commission_Percentage'])
+            data['Updated_By'] = request.user.id if request.user.is_authenticated else None
+            data['Updated_Date'] = timezone.now()
+            serializer = PartnerCommissionRuleSerializer(instance=module, data=data, partial=True)
+            serializer.is_valid(raise_exception=True)
+            serializer.save()
+            return Response(serializer.data, status=status.HTTP_200_OK)
+        except PartnerCommissionRule.DoesNotExist:
+            return Response({"Error": "PartnerCommissionRule not found"}, status=status.HTTP_404_NOT_FOUND)
+        except Exception as e:
+            return Response({"Error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class PartnerCommissionRuleSearch(ListAPIView):
+    queryset = PartnerCommissionRule.objects.all()
+    serializer_class = PartnerCommissionRuleSerializers
+
+    def get_queryset(self):
+        try:
+            data = self.request.GET.get('search', '')
+            module = PartnerCommissionRule.objects.filter(
+                (
+                    Q(PartnerCommissionRule_id__icontains=data) |
+                    Q(Commission_Type__icontains=data)
+                ) &
+                Q(Is_Deleted=False)).order_by('-id')
+            return module
+        except Exception as e:
+            raise Exception(f"Error while fetching partner commission rules: {str(e)}")
+
+
+class PartnerCommissionRuleFilter(APIView):
+    def post(self, request, *args, **kwargs):
+        try:
+            data = request.data
+            data1 = {"Is_Deleted": False}
+            if data.get("Commission_Type"):
+                data1["Commission_Type"] = data["Commission_Type"]
+            if data.get("Is_Active") is not None:
+                data1["Is_Active"] = data["Is_Active"]
+            if data.get("Effective_From"):
+                data1["Effective_From__range"] = data["Effective_From"]
+            if data.get("Created_By"):
+                data1["Created_By_id"] = data["Created_By"]
+            if data.get("Created_Date"):
+                data1["Created_Date__range"] = data["Created_Date"]
+            page = data.get("page", 1)
+            return requestget(model=PartnerCommissionRule, serializer=PartnerCommissionRuleSerializers, data=data1, page=page, Operator='and')
+        except Exception as e:
+            raise Exception(f"Error while fetching partner commission rules: {str(e)}")
+
+
+class PartnerCommissionRuleList(ListAPIView):
+    queryset = PartnerCommissionRule.objects.all()
+    serializer_class = PartnerCommissionRuleSerializers
+
+    def get_queryset(self):
+        try:
+            module = PartnerCommissionRule.objects.filter(Q(Is_Deleted=False)).order_by('-id')
+            return module
+        except Exception as e:
+            raise Exception(f"Error while fetching module: {str(e)}")
+
+
+class PartnerCommissionRulewithoutpagination(APIView):
+    def get(self, request, *args, **kwargs):
+        try:
+            module = PartnerCommissionRule.objects.filter(Q(Is_Deleted__exact=False)).order_by('-id')
+            serialize = PartnerCommissionRuleSerializers(module, many=True)
+            output = JSONRenderer().render(serialize.data)
+            return HttpResponse(output, content_type='application/json', status=status.HTTP_200_OK)
+        except Exception as e:
+            return error_response(str(e))
+
+
+# ==================== Partner Commission ====================
+
+class PartnerCommissionCRUD(APIView):
+    def post(self, request, *args, **kwargs):
+        try:
+            data = get_data(request)
+            for key in COMMISSION_PROTECTED_FIELDS:
+                data.pop(key, None)
+
+            if not data.get('Partner_Id'):
+                return error_response("Partner_Id is required")
+            if data.get('Commission_Type') not in COMMISSION_TYPE_LIST:
+                return error_response(f"Commission_Type must be one of {COMMISSION_TYPE_LIST}")
+            if data['Commission_Type'] in ['Product', 'Extension'] and not data.get('Product_Id'):
+                return error_response("Product_Id is required for Product / Extension commission")
+            sales_order_value = validate_amount(data.get('Sales_Order_Value'), 'Sales_Order_Value')
+
+            # Percentage + amount always come from the rule (80% / 20% / 20%)
+            rule, percentage, amount = calculate_commission(data['Commission_Type'], sales_order_value)
+            data['Rule_Id'] = rule.id if rule else None
+            data['Commission_Percentage'] = percentage
+            data['Commission_Amount'] = amount
+            data['Eligibility_Status'] = 'Not Eligible'
+            data['Commission_Status'] = 'Pending'
+
+            serializer = PartnerCommissionSerializer(data=data)
+            if serializer.is_valid():
+                module = serializer.save()
+                refresh_commission_eligibility(module)
+                output = JSONRenderer().render(PartnerCommissionSerializer(module).data)
+                return HttpResponse(output, content_type='application/json', status=status.HTTP_201_CREATED)
+            output = JSONRenderer().render(serializer.errors)
+            return HttpResponse(output, content_type='application/json', status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            return error_response(str(e))
+
+    def get(self, request, *args, **kwargs):
+        try:
+            data = request.query_params
+            id = data['id']
+            module = PartnerCommission.objects.get(id=id)
+            output = JSONRenderer().render(commission_with_info(module))
+            return HttpResponse(output, content_type='application/json', status=status.HTTP_200_OK)
+        except Exception as e:
+            return error_response(str(e))
+
+    @transaction.atomic
+    def put(self, request, *args, **kwargs):
+        try:
+            data = get_data(request)
+            id = data['id']
+            module = PartnerCommission.objects.select_for_update().get(id=id)
+            if module.Commission_Status in ['Invoice Submitted', 'Approved', 'Paid']:
+                return error_response(f"Commission cannot be changed once {module.Commission_Status}")
+
+            for key in COMMISSION_PROTECTED_FIELDS:
+                data.pop(key, None)
+
+            # Sales order value / type changed -> recalculate from rule
+            if 'Sales_Order_Value' in data or 'Commission_Type' in data:
+                commission_type = data.get('Commission_Type', module.Commission_Type)
+                if commission_type not in COMMISSION_TYPE_LIST:
+                    return error_response(f"Commission_Type must be one of {COMMISSION_TYPE_LIST}")
+                sales_order_value = validate_amount(data.get('Sales_Order_Value', module.Sales_Order_Value), 'Sales_Order_Value')
+                rule, percentage, amount = calculate_commission(commission_type, sales_order_value)
+                data['Rule_Id'] = rule.id if rule else None
+                data['Commission_Percentage'] = percentage
+                data['Commission_Amount'] = amount
+
+            data['Updated_Date'] = timezone.now()
+            serializer = PartnerCommissionSerializer(instance=module, data=data, partial=True)
+            if serializer.is_valid():
+                module = serializer.save()
+                refresh_commission_eligibility(module)
+                output = JSONRenderer().render(PartnerCommissionSerializer(module).data)
+                return HttpResponse(output, content_type='application/json', status=status.HTTP_200_OK)
+            output = JSONRenderer().render(serializer.errors)
+            return HttpResponse(output, content_type='application/json', status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            return error_response(str(e))
+
+    def delete(self, request, *args, **kwargs):
+        try:
+            data = request.query_params
+            id = data['id']
+            module = PartnerCommission.objects.get(id=id)
+            if module.Commission_Status in ['Invoice Submitted', 'Approved', 'Paid']:
+                return error_response(f"Commission cannot be deleted once {module.Commission_Status}")
+            serializer = PartnerCommissionSerializer(module, {"Is_Deleted": True, "Updated_Date": timezone.now()}, partial=True)
+            if serializer.is_valid():
+                serializer.save()
+            output = JSONRenderer().render(serializer.data)
+            return HttpResponse(output, content_type='application/json', status=status.HTTP_200_OK)
+        except Exception as e:
+            return error_response(str(e))
+
+    @transaction.atomic
+    def patch(self, request, *args, **kwargs):
+        try:
+            data = get_data(request)
+            if not data:
+                raise TypeError("Request data cannot be empty")
+            id = data.get('id')
+            module = PartnerCommission.objects.select_for_update().get(id=id)
+            if module.Commission_Status in ['Invoice Submitted', 'Approved', 'Paid']:
+                raise ValueError(f"Commission cannot be changed once {module.Commission_Status}")
+
+            for key in COMMISSION_PROTECTED_FIELDS:
+                data.pop(key, None)
+            if 'Sales_Order_Value' in data or 'Commission_Type' in data:
+                commission_type = data.get('Commission_Type', module.Commission_Type)
+                if commission_type not in COMMISSION_TYPE_LIST:
+                    raise ValueError(f"Commission_Type must be one of {COMMISSION_TYPE_LIST}")
+                sales_order_value = validate_amount(data.get('Sales_Order_Value', module.Sales_Order_Value), 'Sales_Order_Value')
+                rule, percentage, amount = calculate_commission(commission_type, sales_order_value)
+                data['Rule_Id'] = rule.id if rule else None
+                data['Commission_Percentage'] = percentage
+                data['Commission_Amount'] = amount
+
+            data['Updated_Date'] = timezone.now()
+            serializer = PartnerCommissionSerializer(instance=module, data=data, partial=True)
+            serializer.is_valid(raise_exception=True)
+            module = serializer.save()
+            refresh_commission_eligibility(module)
+            return Response(PartnerCommissionSerializer(module).data, status=status.HTTP_200_OK)
+        except PartnerCommission.DoesNotExist:
+            return Response({"Error": "PartnerCommission not found"}, status=status.HTTP_404_NOT_FOUND)
+        except Exception as e:
+            return Response({"Error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class PartnerCommissionSearch(ListAPIView):
+    queryset = PartnerCommission.objects.all()
+    serializer_class = PartnerCommissionSerializers
+
+    def get_queryset(self):
+        try:
+            data = self.request.GET.get('search', '')
+            module = PartnerCommission.objects.filter(
+                (
+                    Q(PartnerCommission_id__icontains=data) |
+                    Q(Commission_Type__icontains=data) |
+                    Q(Commission_Status__icontains=data) |
+                    Q(Eligibility_Status__icontains=data)
+                ) &
+                Q(Is_Deleted=False)).order_by('-id')
+            return module
+        except Exception as e:
+            raise Exception(f"Error while fetching partner commissions: {str(e)}")
+
+
+class PartnerCommissionFilter(APIView):
+    def post(self, request, *args, **kwargs):
+        try:
+            data = request.data
+            data1 = {"Is_Deleted": False}
+            if data.get("Partner_Id"):
+                data1["Partner_Id_id"] = data["Partner_Id"]
+            if data.get("Customer_Id"):
+                data1["Customer_Id_id"] = data["Customer_Id"]
+            if data.get("Product_Id"):
+                data1["Product_Id_id"] = data["Product_Id"]
+            if data.get("Commission_Type"):
+                data1["Commission_Type"] = data["Commission_Type"]
+            if data.get("Commission_Status"):
+                data1["Commission_Status"] = data["Commission_Status"]
+            if data.get("Eligibility_Status"):
+                data1["Eligibility_Status"] = data["Eligibility_Status"]
+            if data.get("Created_Date"):
+                data1["Created_Date__range"] = data["Created_Date"]
+            page = data.get("page", 1)
+            return requestget(model=PartnerCommission, serializer=PartnerCommissionSerializers, data=data1, page=page, Operator='and')
+        except Exception as e:
+            raise Exception(f"Error while fetching partner commissions: {str(e)}")
+
+
+class PartnerCommissionList(ListAPIView):
+    queryset = PartnerCommission.objects.all()
+    serializer_class = PartnerCommissionSerializers
+
+    def get_queryset(self):
+        try:
+            module = PartnerCommission.objects.filter(Q(Is_Deleted=False)).order_by('-id')
+            return module
+        except Exception as e:
+            raise Exception(f"Error while fetching module: {str(e)}")
+
+
+class PartnerCommissionwithoutpagination(APIView):
+    def get(self, request, *args, **kwargs):
+        try:
+            module = PartnerCommission.objects.filter(Q(Is_Deleted__exact=False)).order_by('-id')
+            serialize = PartnerCommissionSerializers(module, many=True)
+            output = JSONRenderer().render(serialize.data)
+            return HttpResponse(output, content_type='application/json', status=status.HTTP_200_OK)
+        except Exception as e:
+            return error_response(str(e))
+
+
+# ==================== Partner Commission Dashboard (Partner Portal) ====================
+
+class PartnerCommissionDashboard(APIView):
+    def get(self, request, *args, **kwargs):
+        try:
+            data = request.query_params
+            module = PartnerCommission.objects.filter(Q(Is_Deleted=False)).order_by('-id')
+            if data.get('Partner_Id'):
+                module = module.filter(Partner_Id_id=data['Partner_Id'])
+
+            summary = get_commission_summary(module)   # cards always show full totals
+            if data.get('Commission_Type'):
+                module = module.filter(Commission_Type=data['Commission_Type'])
+            if data.get('Commission_Status'):
+                module = module.filter(Commission_Status=data['Commission_Status'])
+
+            output = JSONRenderer().render({
+                "Summary": summary,
+                "Commissions": [commission_with_info(obj) for obj in module],
+            })
+            return HttpResponse(output, content_type='application/json', status=status.HTTP_200_OK)
+        except Exception as e:
+            return error_response(str(e))
+
+
+# ==================== Partner Commission Invoice ====================
+
+class PartnerCommissionInvoiceCRUD(APIView):
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
+
+    @transaction.atomic
+    def post(self, request, *args, **kwargs):
+        try:
+            data = get_data(request)
+            for key in INVOICE_PROTECTED_FIELDS:
+                data.pop(key, None)
+
+            commission = PartnerCommission.objects.select_for_update().get(id=data.get('PartnerCommission_Id'), Is_Deleted=False)
+            if str(commission.Partner_Id_id) != str(data.get('Partner_Id')):
+                return error_response("This commission does not belong to this partner", status.HTTP_403_FORBIDDEN)
+            if commission.Commission_Status not in INVOICE_ALLOWED_STATUS:
+                return error_response(f"Invoice cannot be raised. Commission status is {commission.Commission_Status}")
+            is_eligible, message = check_invoice_eligibility(commission)
+            if not is_eligible:
+                return error_response(message)
+            if commission.commission_invoices.filter(Is_Deleted=False, Approval_Status__in=ACTIVE_INVOICE_STATUS).exists():
+                return error_response("An invoice is already submitted for this commission")
+
+            partner_invoice_no = (data.get('Partner_Invoice_No') or '').strip()
+            if not partner_invoice_no:
+                return error_response("Partner_Invoice_No is required")
+            if not data.get('Partner_Invoice_Date'):
+                return error_response("Partner_Invoice_Date is required")
+            invoice_file = request.FILES.get('Invoice_File')
+            if not invoice_file:
+                return error_response("Invoice_File is required")
+            invoice_amount = validate_amount(data.get('Invoice_Amount'), 'Invoice_Amount')
+            if invoice_amount > Decimal(commission.Commission_Amount or 0):
+                return error_response(f"Invoice_Amount cannot exceed commission amount {commission.Commission_Amount}")
+            if PartnerCommissionInvoice.objects.filter(
+                    Q(Partner_Id_id=commission.Partner_Id_id) & Q(Partner_Invoice_No__iexact=partner_invoice_no) & Q(Is_Deleted=False)
+            ).exclude(Approval_Status='Rejected').exists():
+                return error_response("This invoice number is already used")
+
+            data['Partner_Id'] = commission.Partner_Id_id
+            data['Created_By'] = commission.Partner_Id_id
+            data['Partner_Invoice_No'] = partner_invoice_no
+            data['Invoice_File'] = invoice_file
+            data['Invoice_File_Name'] = invoice_file.name[:100]
+            data['Approval_Status'] = 'Submitted'
+            data['Payment_Status'] = 'Pending'
+
+            serializer = PartnerCommissionInvoiceSerializer(data=data)
+            if serializer.is_valid():
+                serializer.save()
+                commission.Commission_Status = 'Invoice Submitted'
+                commission.Updated_Date = timezone.now()
+                commission.save()
+                output = JSONRenderer().render(serializer.data)
+                return HttpResponse(output, content_type='application/json', status=status.HTTP_201_CREATED)
+            output = JSONRenderer().render(serializer.errors)
+            return HttpResponse(output, content_type='application/json', status=status.HTTP_400_BAD_REQUEST)
+        except PartnerCommission.DoesNotExist:
+            return error_response("PartnerCommission not found", status.HTTP_404_NOT_FOUND)
+        except Exception as e:
+            return error_response(str(e))
+
+    def get(self, request, *args, **kwargs):
+        try:
+            data = request.query_params
+            id = data['id']
+            module = PartnerCommissionInvoice.objects.get(id=id)
+            serializer = PartnerCommissionInvoiceSerializers(module)
+            output = JSONRenderer().render(serializer.data)
+            return HttpResponse(output, content_type='application/json', status=status.HTTP_200_OK)
+        except Exception as e:
+            return error_response(str(e))
+
+    def put(self, request, *args, **kwargs):
+        try:
+            data = get_data(request)
+            id = data['id']
+            module = PartnerCommissionInvoice.objects.get(id=id)
+            if module.Approval_Status != 'Submitted':
+                return error_response(f"Invoice cannot be changed once {module.Approval_Status}")
+
+            for key in INVOICE_PROTECTED_FIELDS + ['Partner_Id', 'PartnerCommission_Id', 'Created_By']:
+                data.pop(key, None)
+            if 'Invoice_Amount' in data:
+                invoice_amount = validate_amount(data['Invoice_Amount'], 'Invoice_Amount')
+                if invoice_amount > Decimal(module.PartnerCommission_Id.Commission_Amount or 0):
+                    return error_response(f"Invoice_Amount cannot exceed commission amount {module.PartnerCommission_Id.Commission_Amount}")
+            if request.FILES.get('Invoice_File'):
+                data['Invoice_File'] = request.FILES['Invoice_File']
+                data['Invoice_File_Name'] = request.FILES['Invoice_File'].name[:100]
+
+            data['Updated_Date'] = timezone.now()
+            serializer = PartnerCommissionInvoiceSerializer(instance=module, data=data, partial=True)
+            if serializer.is_valid():
+                serializer.save()
+                output = JSONRenderer().render(serializer.data)
+                return HttpResponse(output, content_type='application/json', status=status.HTTP_200_OK)
+            output = JSONRenderer().render(serializer.errors)
+            return HttpResponse(output, content_type='application/json', status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            return error_response(str(e))
+
+    @transaction.atomic
+    def delete(self, request, *args, **kwargs):
+        try:
+            data = request.query_params
+            id = data['id']
+            module = PartnerCommissionInvoice.objects.get(id=id)
+            if module.Approval_Status != 'Submitted':
+                return error_response(f"Invoice cannot be deleted once {module.Approval_Status}")
+            serializer = PartnerCommissionInvoiceSerializer(module, {"Is_Deleted": True, "Updated_Date": timezone.now()}, partial=True)
+            if serializer.is_valid():
+                serializer.save()
+                # invoice withdrawn -> commission goes back to Eligible
+                commission = module.PartnerCommission_Id
+                commission.Commission_Status = 'Eligible'
+                commission.Updated_Date = timezone.now()
+                commission.save()
+            output = JSONRenderer().render(serializer.data)
+            return HttpResponse(output, content_type='application/json', status=status.HTTP_200_OK)
+        except Exception as e:
+            return error_response(str(e))
+
+    def patch(self, request, *args, **kwargs):
+        try:
+            data = get_data(request)
+            if not data:
+                raise TypeError("Request data cannot be empty")
+            id = data.get('id')
+            module = PartnerCommissionInvoice.objects.get(id=id)
+            if module.Approval_Status != 'Submitted':
+                raise ValueError(f"Invoice cannot be changed once {module.Approval_Status}")
+
+            for key in INVOICE_PROTECTED_FIELDS + ['Partner_Id', 'PartnerCommission_Id', 'Created_By']:
+                data.pop(key, None)
+            if 'Invoice_Amount' in data:
+                invoice_amount = validate_amount(data['Invoice_Amount'], 'Invoice_Amount')
+                if invoice_amount > Decimal(module.PartnerCommission_Id.Commission_Amount or 0):
+                    raise ValueError(f"Invoice_Amount cannot exceed commission amount {module.PartnerCommission_Id.Commission_Amount}")
+            if request.FILES.get('Invoice_File'):
+                data['Invoice_File'] = request.FILES['Invoice_File']
+                data['Invoice_File_Name'] = request.FILES['Invoice_File'].name[:100]
+
+            data['Updated_Date'] = timezone.now()
+            serializer = PartnerCommissionInvoiceSerializer(instance=module, data=data, partial=True)
+            serializer.is_valid(raise_exception=True)
+            serializer.save()
+            return Response(serializer.data, status=status.HTTP_200_OK)
+        except PartnerCommissionInvoice.DoesNotExist:
+            return Response({"Error": "PartnerCommissionInvoice not found"}, status=status.HTTP_404_NOT_FOUND)
+        except Exception as e:
+            return Response({"Error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class PartnerCommissionInvoiceSearch(ListAPIView):
+    queryset = PartnerCommissionInvoice.objects.all()
+    serializer_class = PartnerCommissionInvoiceSerializers
+
+    def get_queryset(self):
+        try:
+            data = self.request.GET.get('search', '')
+            module = PartnerCommissionInvoice.objects.filter(
+                (
+                    Q(PartnerCommissionInvoice_id__icontains=data) |
+                    Q(Partner_Invoice_No__icontains=data) |
+                    Q(Approval_Status__icontains=data) |
+                    Q(Payment_Status__icontains=data) |
+                    Q(Payment_Reference_No__icontains=data)
+                ) &
+                Q(Is_Deleted=False)).order_by('-id')
+            return module
+        except Exception as e:
+            raise Exception(f"Error while fetching partner commission invoices: {str(e)}")
+
+
+class PartnerCommissionInvoiceFilter(APIView):
+    def post(self, request, *args, **kwargs):
+        try:
+            data = request.data
+            data1 = {"Is_Deleted": False}
+            if data.get("Partner_Id"):
+                data1["Partner_Id_id"] = data["Partner_Id"]
+            if data.get("PartnerCommission_Id"):
+                data1["PartnerCommission_Id_id"] = data["PartnerCommission_Id"]
+            if data.get("Approval_Status"):
+                data1["Approval_Status"] = data["Approval_Status"]
+            if data.get("Payment_Status"):
+                data1["Payment_Status"] = data["Payment_Status"]
+            if data.get("Approved_By"):
+                data1["Approved_By_id"] = data["Approved_By"]
+            if data.get("Partner_Invoice_Date"):
+                data1["Partner_Invoice_Date__range"] = data["Partner_Invoice_Date"]
+            if data.get("Created_Date"):
+                data1["Created_Date__range"] = data["Created_Date"]
+            page = data.get("page", 1)
+            return requestget(model=PartnerCommissionInvoice, serializer=PartnerCommissionInvoiceSerializers, data=data1, page=page, Operator='and')
+        except Exception as e:
+            raise Exception(f"Error while fetching partner commission invoices: {str(e)}")
+
+
+class PartnerCommissionInvoiceList(ListAPIView):
+    queryset = PartnerCommissionInvoice.objects.all()
+    serializer_class = PartnerCommissionInvoiceSerializers
+
+    def get_queryset(self):
+        try:
+            module = PartnerCommissionInvoice.objects.filter(Q(Is_Deleted=False)).order_by('-id')
+            return module
+        except Exception as e:
+            raise Exception(f"Error while fetching module: {str(e)}")
+
+
+class PartnerCommissionInvoicewithoutpagination(APIView):
+    def get(self, request, *args, **kwargs):
+        try:
+            module = PartnerCommissionInvoice.objects.filter(Q(Is_Deleted__exact=False)).order_by('-id')
+            serialize = PartnerCommissionInvoiceSerializers(module, many=True)
+            output = JSONRenderer().render(serialize.data)
+            return HttpResponse(output, content_type='application/json', status=status.HTTP_200_OK)
+        except Exception as e:
+            return error_response(str(e))
+
+
+# ==================== Partner Commission Invoice Approval (Super Admin) ====================
+
+class PartnerCommissionInvoiceApproval(APIView):
+    @transaction.atomic
+    def put(self, request, *args, **kwargs):
+        try:
+            data = request.data
+            id = data['id']
+            approval_status = data.get('Approval_Status')
+            rejection_reason = (data.get('Rejection_Reason') or '').strip()
+
+            if approval_status not in ['Under Review', 'Approved', 'Rejected']:
+                return error_response("Approval_Status must be Under Review, Approved or Rejected")
+            if approval_status == 'Rejected' and not rejection_reason:
+                return error_response("Rejection_Reason is required when rejecting")
+
+            module = PartnerCommissionInvoice.objects.select_for_update().get(id=id, Is_Deleted=False)
+            if module.Approval_Status in ['Approved', 'Rejected']:
+                return error_response(f"Invoice is already {module.Approval_Status}")
+
+            data1 = {"Approval_Status": approval_status, "Updated_Date": timezone.now()}
+            commission = module.PartnerCommission_Id
+            if approval_status == 'Approved':
+                data1["Approved_By"] = data.get('Approved_By')
+                data1["Approved_Date"] = timezone.now()
+                data1["Rejection_Reason"] = None
+                commission.Commission_Status = 'Approved'
+            elif approval_status == 'Rejected':
+                data1["Rejection_Reason"] = rejection_reason
+                commission.Commission_Status = 'Rejected'   # partner can submit a new invoice
+
+            serializer = PartnerCommissionInvoiceSerializer(instance=module, data=data1, partial=True)
+            if serializer.is_valid():
+                serializer.save()
+                commission.Updated_Date = timezone.now()
+                commission.save()
+                output = JSONRenderer().render(serializer.data)
+                return HttpResponse(output, content_type='application/json', status=status.HTTP_200_OK)
+            output = JSONRenderer().render(serializer.errors)
+            return HttpResponse(output, content_type='application/json', status=status.HTTP_400_BAD_REQUEST)
+        except PartnerCommissionInvoice.DoesNotExist:
+            return error_response("PartnerCommissionInvoice not found", status.HTTP_404_NOT_FOUND)
+        except Exception as e:
+            return error_response(str(e))
+
+
+# ==================== Partner Commission Invoice Payment (Super Admin) ====================
+
+class PartnerCommissionInvoicePayment(APIView):
+    @transaction.atomic
+    def put(self, request, *args, **kwargs):
+        try:
+            data = request.data
+            id = data['id']
+            payment_status = data.get('Payment_Status')
+            payment_reference_no = (data.get('Payment_Reference_No') or '').strip()
+
+            if payment_status not in ['Processing', 'Paid']:
+                return error_response("Payment_Status must be Processing or Paid")
+            if payment_status == 'Paid' and not payment_reference_no:
+                return error_response("Payment_Reference_No is required when marking Paid")
+
+            module = PartnerCommissionInvoice.objects.select_for_update().get(id=id, Is_Deleted=False)
+            if module.Approval_Status != 'Approved':
+                return error_response("Only approved invoices can be paid")
+            if module.Payment_Status == 'Paid':
+                return error_response("Invoice is already paid")
+
+            data1 = {"Payment_Status": payment_status, "Updated_Date": timezone.now()}
+            if payment_reference_no:
+                data1["Payment_Reference_No"] = payment_reference_no
+            if payment_status == 'Paid':
+                data1["Payment_Date"] = data.get('Payment_Date') or timezone.now()
+
+            serializer = PartnerCommissionInvoiceSerializer(instance=module, data=data1, partial=True)
+            if serializer.is_valid():
+                serializer.save()
+                if payment_status == 'Paid':
+                    commission = module.PartnerCommission_Id
+                    commission.Commission_Status = 'Paid'
+                    commission.Updated_Date = timezone.now()
+                    commission.save()
+                output = JSONRenderer().render(serializer.data)
+                return HttpResponse(output, content_type='application/json', status=status.HTTP_200_OK)
+            output = JSONRenderer().render(serializer.errors)
+            return HttpResponse(output, content_type='application/json', status=status.HTTP_400_BAD_REQUEST)
+        except PartnerCommissionInvoice.DoesNotExist:
+            return error_response("PartnerCommissionInvoice not found", status.HTTP_404_NOT_FOUND)
+        except Exception as e:
+            return error_response(str(e))
+
+
+# ==================== Partner Commission Calculation (Super Admin Invoice) ====================
+
+class PartnerCommissionCalculate(APIView):
+    @transaction.atomic
+    def post(self, request, *args, **kwargs):
+        try:
+            data = request.data
+
+            invoice = Invoice.objects.filter(id=data.get('Invoice_Id')).first()
+            if not invoice:
+                return error_response("Invoice not found", status.HTTP_404_NOT_FOUND)
+            partner = Partner.objects.filter(id=data.get('Partner_Id')).first()
+            if not partner:
+                return error_response("Partner not found", status.HTTP_404_NOT_FOUND)
+            customer = Account.objects.filter(id=data.get('Customer_Id')).first()
+            if not customer:
+                return error_response("Customer not found", status.HTTP_404_NOT_FOUND)
+            instance_request = InstanceRequest.objects.filter(id=data.get('InstanceRequest_Id')).first() if data.get('InstanceRequest_Id') else None
+
+            items = data.get('Items') or []
+            if not isinstance(items, list) or not items:
+                return error_response("Items is required")
+
+            # validate every line first, so nothing is saved if one line is wrong
+            for index, item in enumerate(items, start=1):
+                if item.get('Commission_Type') not in COMMISSION_TYPE_LIST:
+                    return error_response(f"Item {index}: Commission_Type must be one of {COMMISSION_TYPE_LIST}")
+                validate_amount(item.get('Amount'), f"Item {index}: Amount")
+                if item['Commission_Type'] in ['Product', 'Extension']:
+                    if not item.get('Product_Id'):
+                        return error_response(f"Item {index}: Product_Id is required for Product / Extension")
+                    if not ProductMaster.objects.filter(id=item['Product_Id']).exists():
+                        return error_response(f"Item {index}: Product not found", status.HTTP_404_NOT_FOUND)
+
+            save = data.get('Save', True) not in [False, 'false', 'False', 0, '0']
+            results = calculate_invoice_commissions(invoice, partner, customer, items, instance_request, save=save)
+
+            total = sum(Decimal(row['Commission_Amount']) for row in results)
+            output = JSONRenderer().render({
+                "Invoice_Id": invoice.id,
+                "Partner_Id": partner.id,
+                "Customer_Id": customer.id,
+                "Saved": save,
+                "Total_Commission_Amount": str(total),
+                "Commissions": results,
+            })
+            return HttpResponse(output, content_type='application/json', status=status.HTTP_201_CREATED if save else status.HTTP_200_OK)
+        except Exception as e:
+            return error_response(str(e))
+
+
+# ==================== Eligible Commissions for Invoice (Partner - My Invoice create dropdown) ====================
+
+class PartnerCommissionEligibleForInvoice(APIView):
+    def get(self, request, *args, **kwargs):
+        try:
+            data = request.query_params
+            partner_id = data['Partner_Id']
+            module = PartnerCommission.objects.filter(
+                Q(Partner_Id_id=partner_id) &
+                Q(Commission_Status__in=INVOICE_ALLOWED_STATUS) &
+                Q(Is_Deleted=False)
+            ).exclude(
+                id__in=PartnerCommissionInvoice.objects.filter(
+                    Is_Deleted=False, Approval_Status__in=ACTIVE_INVOICE_STATUS
+                ).values('PartnerCommission_Id')
+            ).order_by('-id')
+            output = JSONRenderer().render([commission_with_info(obj) for obj in module])
+            return HttpResponse(output, content_type='application/json', status=status.HTTP_200_OK)
+        except Exception as e:
+            return error_response(str(e))
+
+
+
+
+
 
 

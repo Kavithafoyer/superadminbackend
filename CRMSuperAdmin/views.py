@@ -2286,6 +2286,95 @@ def ID(model,serializer,id):
     intid = int(output[id][3:]) + 1
     return str(intid).zfill(9)
 
+# class InvoiceCRUD(APIView):
+
+#     queryset = Invoice.objects.all()
+#     serializer_class = Invoiceserializer
+#     authentication_classes = [JWTAuthentication]
+#     permission_classes = [DjangoModelPermissions]
+
+#     def get(self, request, *args, **kwargs):
+#         try:
+#                 data = request.query_params
+#                 invoice = Invoice.objects.get(id=data['id'])
+#                 return HttpResponse(JSONRenderer().render(Invoiceserializerdepth(invoice).data),
+#                                     content_type='application/json')
+#         except Exception as e:
+#             return HttpResponse(JSONRenderer().render({"Error": str(e)}), content_type='application/json',
+#                                 status=status.HTTP_417_EXPECTATION_FAILED)
+
+#     def post(self, request, *args, **kwargs):
+#         try:
+#             data = request.data
+#             # data['Invoice_Id']=Transaction_Series(data['Organization_Id'],Invoice,"Invoice","Invoice_Id",data['Invoice_Id'])
+#             data['Invoice_Id'] = 'INV' + str(ID(Invoice,Invoiceserializer,'Invoice_Id'))
+#             return requestpost(Invoiceserializer, data=data)
+
+#         except Exception as e:
+#             return HttpResponse(JSONRenderer().render({"Error": str(e)}), content_type='application/json',
+#                                 status=status.HTTP_417_EXPECTATION_FAILED)
+
+#     def put(self, request, *args, **kwargs):
+#         try:
+#             data = request.data
+#             # data = request
+#             return requestput(model=Invoice, serializers=Invoiceserializer, data=data,
+#                               filterdata={"id": data['id']})
+#             # invoicedetails = Invoicedetails.objects.get(Invoice_Detail_Id=data['Invoice_Detail_Id'])
+#             # serializer = Invoicedetailserializer(invoicedetails, data=data)
+#             # if serializer.is_valid():
+#             #     serializer.save()
+#             #     return HttpResponse(JSONRenderer().render(serializer.data), content_type='application/json')
+#             # return HttpResponse(JSONRenderer().render(serializer.errors), status=status.HTTP_400_BAD_REQUEST)
+#         except Exception as e:
+#             return HttpResponse(JSONRenderer().render({"Error": str(e)}), content_type='application/json',
+#                                 status=status.HTTP_417_EXPECTATION_FAILED)
+
+#     def patch(self, request, *args, **kwargs):
+#         try:
+#             data = request.data
+#             # data = request
+#             return requestpatch(model=Invoice, serializers=Invoiceserializer, data=data,
+#                                 filterdata={"id": data['id']})
+#             # invoicedetails = Invoicedetails.objects.get(Invoice_Detail_Id=data['Invoice_Detail_Id'])
+#             # serializer = Invoicedetailserializer(invoicedetails, data=data, partial=True)
+#             # if serializer.is_valid():
+#             #     serializer.save()
+#             #     return HttpResponse(JSONRenderer().render(serializer.data), content_type='application/json')
+#             # return HttpResponse(JSONRenderer().render(serializer.errors), status=status.HTTP_400_BAD_REQUEST)
+#         except Exception as e:
+#             return HttpResponse(JSONRenderer().render({"Error": str(e)}), content_type='application/json',
+#                                 status=status.HTTP_417_EXPECTATION_FAILED)
+
+#     def delete(self, request, *args, **kwargs):
+#         try:
+#             data = request.data
+#             # data = request
+#             # if data == '' or data == {}:
+#             #     raise TypeError("Give the perfect Payload")
+#             return requestpatch(model=Invoice, serializers=Invoiceserializer, data={'Is_Deleted': True},
+#                                 filterdata={"Invoice_Id": data['Invoice_Id']})
+#             # invoicedetails = Invoicedetails.objects.filter(Invoice_Detail_Id=data['Invoice_Detail_Id']).update(
+#             #     Is_Deleted=True)
+#             # if invoicedetails == 0:
+#             #     raise TypeError("please provide vaild Invoice_Detail_Id")
+#             # return HttpResponse(
+#             #     JSONRenderer().render({"message": "Modulepackage " + str(data['Invoice_Detail_Id']) + " is deleted"}),
+#             #     content_type='application/json')
+#         except Exception as e:
+#             return HttpResponse(JSONRenderer().render({"Error": str(e)}), content_type='application/json',
+#                                 status=status.HTTP_417_EXPECTATION_FAILED)
+
+
+# ==================== InvoiceCRUD with Partner Commission ====================
+# Only post() changed. get / put / patch / delete are the same as yours.
+#
+# Add these imports at the top of your invoice views file:
+import json
+from django.db import transaction
+from partner.views import validate_commission_payload, calculate_invoice_commissions   # TODO: your app name
+
+
 class InvoiceCRUD(APIView):
 
     queryset = Invoice.objects.all()
@@ -2308,7 +2397,32 @@ class InvoiceCRUD(APIView):
             data = request.data
             # data['Invoice_Id']=Transaction_Series(data['Organization_Id'],Invoice,"Invoice","Invoice_Id",data['Invoice_Id'])
             data['Invoice_Id'] = 'INV' + str(ID(Invoice,Invoiceserializer,'Invoice_Id'))
-            return requestpost(Invoiceserializer, data=data)
+
+            # ---------- Partner Commission: check BEFORE saving the invoice ----------
+            # Payload keys (only when this invoice has a partner):
+            #   Commission_Partner_Id, Commission_Customer_Id, Commission_InstanceRequest_Id (optional),
+            #   Commission_Items = [{"Commission_Type": "Implementation", "Amount": 100000},
+            #                       {"Commission_Type": "Product", "Product_Id": 3, "Amount": 50000}]
+            commission = None
+            if data.get('Commission_Items'):
+                commission = validate_commission_payload(
+                    data.get('Commission_Partner_Id'),
+                    data.get('Commission_Customer_Id'),
+                    data.get('Commission_Items'),
+                    data.get('Commission_InstanceRequest_Id'),
+                )
+
+            # ---------- Save invoice + commission together ----------
+            with transaction.atomic():
+                response = requestpost(Invoiceserializer, data=data)
+
+                if commission and response.status_code in [200, 201]:
+                    invoice_data = json.loads(response.content)
+                    invoice = Invoice.objects.get(id=invoice_data['id'])
+                    partner, customer, instance_request, items = commission
+                    calculate_invoice_commissions(invoice, partner, customer, items, instance_request, save=True)
+
+            return response
 
         except Exception as e:
             return HttpResponse(JSONRenderer().render({"Error": str(e)}), content_type='application/json',
@@ -2317,15 +2431,8 @@ class InvoiceCRUD(APIView):
     def put(self, request, *args, **kwargs):
         try:
             data = request.data
-            # data = request
             return requestput(model=Invoice, serializers=Invoiceserializer, data=data,
                               filterdata={"id": data['id']})
-            # invoicedetails = Invoicedetails.objects.get(Invoice_Detail_Id=data['Invoice_Detail_Id'])
-            # serializer = Invoicedetailserializer(invoicedetails, data=data)
-            # if serializer.is_valid():
-            #     serializer.save()
-            #     return HttpResponse(JSONRenderer().render(serializer.data), content_type='application/json')
-            # return HttpResponse(JSONRenderer().render(serializer.errors), status=status.HTTP_400_BAD_REQUEST)
         except Exception as e:
             return HttpResponse(JSONRenderer().render({"Error": str(e)}), content_type='application/json',
                                 status=status.HTTP_417_EXPECTATION_FAILED)
@@ -2333,15 +2440,8 @@ class InvoiceCRUD(APIView):
     def patch(self, request, *args, **kwargs):
         try:
             data = request.data
-            # data = request
             return requestpatch(model=Invoice, serializers=Invoiceserializer, data=data,
                                 filterdata={"id": data['id']})
-            # invoicedetails = Invoicedetails.objects.get(Invoice_Detail_Id=data['Invoice_Detail_Id'])
-            # serializer = Invoicedetailserializer(invoicedetails, data=data, partial=True)
-            # if serializer.is_valid():
-            #     serializer.save()
-            #     return HttpResponse(JSONRenderer().render(serializer.data), content_type='application/json')
-            # return HttpResponse(JSONRenderer().render(serializer.errors), status=status.HTTP_400_BAD_REQUEST)
         except Exception as e:
             return HttpResponse(JSONRenderer().render({"Error": str(e)}), content_type='application/json',
                                 status=status.HTTP_417_EXPECTATION_FAILED)
@@ -2349,21 +2449,13 @@ class InvoiceCRUD(APIView):
     def delete(self, request, *args, **kwargs):
         try:
             data = request.data
-            # data = request
-            # if data == '' or data == {}:
-            #     raise TypeError("Give the perfect Payload")
             return requestpatch(model=Invoice, serializers=Invoiceserializer, data={'Is_Deleted': True},
                                 filterdata={"Invoice_Id": data['Invoice_Id']})
-            # invoicedetails = Invoicedetails.objects.filter(Invoice_Detail_Id=data['Invoice_Detail_Id']).update(
-            #     Is_Deleted=True)
-            # if invoicedetails == 0:
-            #     raise TypeError("please provide vaild Invoice_Detail_Id")
-            # return HttpResponse(
-            #     JSONRenderer().render({"message": "Modulepackage " + str(data['Invoice_Detail_Id']) + " is deleted"}),
-            #     content_type='application/json')
         except Exception as e:
             return HttpResponse(JSONRenderer().render({"Error": str(e)}), content_type='application/json',
                                 status=status.HTTP_417_EXPECTATION_FAILED)
+
+
 
 class Invoicemylist(ListAPIView):
     queryset = Invoice.objects.all().order_by('-id')
@@ -13213,7 +13305,7 @@ class AddonCategorySearch(ListAPIView):
             module = AddonCategory.objects.filter(
                 (
                     Q(Category_Name__icontains=data) |
-                    Q(Status__icontains=data)                                                  
+                    Q(Status__icontains=data)
                 ) & Q(Is_Deleted=False)
             )
             return module
@@ -13238,7 +13330,7 @@ class AddonCategoryFilter(ListAPIView):
         try:
             data=request.data
             filter_data={"Is_Deleted":False}
-        
+
             if data.get("Status"):
                 filter_data["Status__icontains"]=data.get("Status")
 
@@ -13398,7 +13490,7 @@ class AddonProductCompatibilitySearch(ListAPIView):
             module = AddonProductCompatibility.objects.filter(
                 (
                     Q(Addon_Name__icontains=data) |
-                    Q(Product_Name__icontains=data)                                                                    
+                    Q(Product_Name__icontains=data)
                 ) & Q(Is_Deleted=False)
             )
             return module
@@ -13423,7 +13515,7 @@ class AddonProductCompatibilityFilter(ListAPIView):
         try:
             data=request.data
             filter_data={"Is_Deleted":False}
-        
+
             if data.get("Created_By"):
                 filter_data["Created_By"]=data.get("Created_By")
             if data.get("fromdate") and data.get("todate"):
@@ -13435,7 +13527,7 @@ class AddonProductCompatibilityFilter(ListAPIView):
             return HttpResponse(JSONRenderer().render({"Error":str(e)}),content_type='application/json',status=status.HTTP_400_BAD_REQUEST)
 
 
-# Add on Price Template 
+# Add on Price Template
 
 
 class AddonPriceTemplateCRUD(APIView):
@@ -13527,7 +13619,7 @@ class AddonPriceTemplateSearch(ListAPIView):
                 (
                     Q(Template_Name__icontains=data) |
                     Q(Billing_Cycle__icontains=data) |
-                    Q(Billing_Type__icontains=data)                                                                    
+                    Q(Billing_Type__icontains=data)
                 ) & Q(Is_Deleted=False)
             )
             return module
@@ -13552,7 +13644,7 @@ class AddonPriceTemplateFilter(ListAPIView):
         try:
             data=request.data
             filter_data={"Is_Deleted":False}
-        
+
             if data.get("Created_By"):
                 filter_data["Created_By"]=data.get("Created_By")
             if data.get("fromdate") and data.get("todate"):
@@ -13655,7 +13747,7 @@ class AddonPricingSearch(ListAPIView):
             module = AddonPricing.objects.filter(
                 (
                     Q(Addon_Name__icontains=data) |
-                    Q(Price_Template_Name__icontains=data)                                                                                   
+                    Q(Price_Template_Name__icontains=data)
                 ) & Q(Is_Deleted=False)
             )
             return module
@@ -13680,7 +13772,7 @@ class AddonPricingFilter(ListAPIView):
         try:
             data=request.data
             filter_data={"Is_Deleted":False}
-        
+
             if data.get("Created_By"):
                 filter_data["Created_By"]=data.get("Created_By")
             if data.get("fromdate") and data.get("todate"):
@@ -13790,7 +13882,7 @@ class AddonTieredPricingFilter(ListAPIView):
         try:
             data=request.data
             filter_data={"Is_Deleted":False}
-        
+
             if data.get("Created_By"):
                 filter_data["Created_By"]=data.get("Created_By")
             if data.get("fromdate") and data.get("todate"):
@@ -13904,7 +13996,7 @@ class AddonDiscountCouponFilter(ListAPIView):
         try:
             data=request.data
             filter_data={"Is_Deleted":False}
-        
+
             if data.get("Created_By"):
                 filter_data["Created_By"]=data.get("Created_By")
             if data.get("fromdate") and data.get("todate"):
@@ -14014,7 +14106,7 @@ class AddonPriceHistoryFilter(ListAPIView):
         try:
             data=request.data
             filter_data={"Is_Deleted":False}
-        
+
             if data.get("Changed_By"):
                 filter_data["Changed_By"]=data.get("Changed_By")
             if data.get("fromdate") and data.get("todate"):

@@ -771,3 +771,154 @@ class DailyWorkUpdate(models.Model):
     class Meta:
         db_table = 'DailyWorkUpdate'
 
+
+
+
+# PARTNER COMMISSION
+
+from CRMSuperAdmin.models import *
+from CRMUserAdmin.models import *
+
+
+def PartnerCommissionRule_ID_I():
+    try:
+        last_obj = PartnerCommissionRule.objects.all().order_by('id').last()
+        if not last_obj or not last_obj.PartnerCommissionRule_id:
+            return "PCR" + "000000001"
+        number = int(last_obj.PartnerCommissionRule_id[3:])
+        return "PCR" + str(number + 1).zfill(9)
+    except Exception:
+        return "PCR" + "000000001"
+
+
+# ==================== Partner Commission Rule ====================
+
+class PartnerCommissionRule(models.Model):
+    PartnerCommissionRule_id = models.CharField(max_length=64, default=PartnerCommissionRule_ID_I, blank=True, null=True)
+    Commission_Type = models.CharField(max_length=50, blank=True, null=True)
+    Commission_Percentage = models.DecimalField(max_digits=5, decimal_places=2, default=0.00, blank=True, null=True)
+    Is_Active = models.BooleanField(default=True, blank=True, null=True)
+    Effective_From = models.DateField(default=timezone.now, blank=True, null=True)
+    Effective_To = models.DateField(blank=True, null=True)
+    Is_Deleted = models.BooleanField(default=False, blank=True, null=True)
+    Created_Date = models.DateTimeField(default=timezone.now, blank=True, null=True)
+    Updated_Date = models.DateTimeField(default=timezone.now, blank=True, null=True)
+    Created_By = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='create_partner_comm')
+    Updated_By = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='update_partner_comm')
+
+    class Meta:
+        db_table = 'PartnerCommissionRule'
+
+
+def PartnerCommission_ID_I():
+    try:
+        last_obj = PartnerCommission.objects.all().order_by('id').last()
+        if not last_obj or not last_obj.PartnerCommission_id:
+            return "PC" + "000000001"
+        number = int(last_obj.PartnerCommission_id[2:])
+        return "PC" + str(number + 1).zfill(9)
+    except Exception:
+        return "PC" + "000000001"
+
+
+# ==================== Partner Commission ====================
+
+class PartnerCommission(models.Model):
+    COMMISSION_TYPES = [
+        ('Implementation', 'Implementation'),
+        ('Product', 'Product'),
+        ('Extension', 'Extension'),
+    ]
+
+    COMMISSION_STATUS = [
+        ('Pending', 'Pending'),
+        ('Eligible', 'Eligible'),
+        ('Invoice Submitted', 'Invoice Submitted'),
+        ('Approved', 'Approved'),
+        ('Rejected', 'Rejected'),
+        ('Paid', 'Paid'),
+    ]
+
+    PartnerCommission_id = models.CharField(max_length=64, default=PartnerCommission_ID_I, blank=True, null=True)
+    Partner_Id = models.ForeignKey(Partner, on_delete=models.CASCADE, related_name='partner_commissions', blank=True, null=True)
+    Customer_Id = models.ForeignKey(Account, on_delete=models.CASCADE, related_name='partner_commissions', blank=True, null=True)
+    Invoice_Id = models.ForeignKey(Invoice, on_delete=models.CASCADE, related_name='partner_commissions', blank=True, null=True)
+    InstanceRequest_Id = models.ForeignKey(InstanceRequest, on_delete=models.CASCADE, related_name='partner_commissions', blank=True, null=True)
+    Product_Id = models.ForeignKey(ProductMaster, on_delete=models.CASCADE, related_name='partner_commissions', blank=True, null=True)
+    Rule_Id = models.ForeignKey(PartnerCommissionRule, on_delete=models.SET_NULL, related_name='partner_commissions', blank=True, null=True)
+    Commission_Type = models.CharField(max_length=50, choices=COMMISSION_TYPES, blank=True, null=True)
+    Sales_Order_Value = models.DecimalField(max_digits=15, decimal_places=2, default=0.00, blank=True, null=True)
+    Commission_Percentage = models.DecimalField(max_digits=5, decimal_places=2, default=0.00, blank=True, null=True)
+    Commission_Amount = models.DecimalField(max_digits=15, decimal_places=2, default=0.00, blank=True, null=True)
+    Eligibility_Status = models.CharField(max_length=30, default='Not Eligible', blank=True, null=True)
+    Commission_Status = models.CharField(max_length=50, choices=COMMISSION_STATUS, default='Pending', blank=True, null=True)
+    Implementation_Completed = models.BooleanField(default=False, blank=True, null=True)
+    Customer_Signoff_Received = models.BooleanField(default=False, blank=True, null=True)
+    Customer_Payment_Received = models.BooleanField(default=False, blank=True, null=True)
+    Eligible_Date = models.DateTimeField(blank=True, null=True)
+    Is_Deleted = models.BooleanField(default=False, blank=True, null=True)
+    Created_Date = models.DateTimeField(default=timezone.now, blank=True, null=True)
+    Updated_Date = models.DateTimeField(default=timezone.now, blank=True, null=True)
+
+    class Meta:
+        db_table = 'PartnerCommission'
+
+
+
+def PartnerCommissionInvoice_ID_I():
+    try:
+        last_obj = PartnerCommissionInvoice.objects.all().order_by('id').last()
+        if not last_obj or not last_obj.PartnerCommissionInvoice_id:
+            return "PCI" + "000000001"
+        number = int(last_obj.PartnerCommissionInvoice_id[3:])
+        return "PCI" + str(number + 1).zfill(9)
+    except Exception:
+        return "PCI" + "000000001"
+
+
+# ==================== Partner Commission Invoice ====================
+
+class PartnerCommissionInvoice(models.Model):
+    APPROVAL_STATUS = [
+        ('Submitted', 'Submitted'),
+        ('Under Review', 'Under Review'),
+        ('Approved', 'Approved'),
+        ('Rejected', 'Rejected'),
+    ]
+
+    PAYMENT_STATUS = [
+        ('Pending', 'Pending'),
+        ('Processing', 'Processing'),
+        ('Paid', 'Paid'),
+    ]
+
+    PartnerCommissionInvoice_id = models.CharField(max_length=64, default=PartnerCommissionInvoice_ID_I, blank=True, null=True)
+    Partner_Id = models.ForeignKey(Partner, on_delete=models.CASCADE, related_name='commission_invoices', blank=True, null=True)
+    PartnerCommission_Id = models.ForeignKey(PartnerCommission, on_delete=models.CASCADE, related_name='commission_invoices', blank=True, null=True)
+    Partner_Invoice_No = models.CharField(max_length=100, blank=True, null=True)
+    Partner_Invoice_Date = models.DateField(blank=True, null=True)
+    Invoice_Amount = models.DecimalField(max_digits=15, decimal_places=2, default=0.00, blank=True, null=True)
+    Invoice_File = models.FileField(blank=True, null=True)
+    Invoice_File_Name = models.CharField(max_length=100, blank=True, null=True)
+    Approval_Status = models.CharField(max_length=30, choices=APPROVAL_STATUS, default='Submitted', blank=True, null=True)
+    Approved_By = models.ForeignKey(UserAdmin, on_delete=models.SET_NULL, related_name='approved_partner_commission_invoices', blank=True, null=True)
+    Approved_Date = models.DateTimeField(blank=True, null=True)
+    Rejection_Reason = models.TextField(blank=True, null=True)
+    Payment_Status = models.CharField(max_length=30, choices=PAYMENT_STATUS, default='Pending', blank=True, null=True)
+    Payment_Date = models.DateTimeField(blank=True, null=True)
+    Payment_Reference_No = models.CharField(max_length=150, blank=True, null=True)
+    Is_Deleted = models.BooleanField(default=False, blank=True, null=True)
+    Created_Date = models.DateTimeField(default=timezone.now, blank=True, null=True)
+    Updated_Date = models.DateTimeField(default=timezone.now, blank=True, null=True)
+    Created_By = models.ForeignKey(Partner, on_delete=models.SET_NULL, null=True, blank=True, related_name='create_partner_invoice')
+
+    class Meta:
+        db_table = 'PartnerCommissionInvoice'
+
+
+
+
+
+
+
+
