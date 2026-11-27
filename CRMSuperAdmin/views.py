@@ -44,7 +44,7 @@ from django.core.mail import send_mail
 from django.core.files.base import ContentFile
 from django.db import connections
 from django.db.utils import ProgrammingError
-from django.db import transaction
+from django.db import ProgrammingError, transaction
 
 
 from django.db.models import (
@@ -412,6 +412,8 @@ class ProductFeatureCRUD(APIView):
     def post(self, request, *args, **kwargs):
         try:
             data = request.data
+            if not data.get('Module_Id') and not data.get('Product_Id'):
+                return Response({'Product_Id': 'Select a product or a module.'}, status=status.HTTP_400_BAD_REQUEST)
             serialize = ProductFeatureSerializer(data=data)
             if serialize.is_valid():
                 serialize.save()
@@ -426,18 +428,23 @@ class ProductFeatureCRUD(APIView):
     def get(self, request, *args, **kwargs):
         try:
             data = request.query_params
+            records = catalog_feature_scope(ProductFeature.objects.filter(Is_Deleted=False), data)
             feature_id = data.get('id')
             if feature_id:
-                module = ProductFeature.objects.get(id=feature_id)
+                module = records.get(id=feature_id)
             elif data.get('Feature_Id'):
-                module = ProductFeature.objects.get(Feature_Id=data.get('Feature_Id'))
+                module = records.get(Feature_Id=data.get('Feature_Id'))
             elif data.get('Feature_Code'):
-                module = ProductFeature.objects.get(Feature_Code=data.get('Feature_Code'))
+                module = records.get(Feature_Code=data.get('Feature_Code'))
             else:
                 raise Exception("id or Feature_Id or Feature_Code parameter is required")
             serialize = ProductFeatureSerializer(module)
             output = JSONRenderer().render(serialize.data)
             return HttpResponse(output, content_type="application/json", status=status.HTTP_200_OK)
+        except ValidationError:
+            raise
+        except ProductFeature.DoesNotExist:
+            return Response({'detail': 'Record not found.'}, status=status.HTTP_404_NOT_FOUND)
         except Exception as e:
             output = JSONRenderer().render({"Error": str(e)})
             return HttpResponse(output, content_type="application/json", status=status.HTTP_400_BAD_REQUEST)
@@ -487,11 +494,12 @@ class ProductFeatureCRUD(APIView):
     def delete(self, request, *args, **kwargs):
         try:
             data = request.query_params if request.query_params.get('id') else request.data
+            records = catalog_feature_scope(ProductFeature.objects.filter(Is_Deleted=False), data)
             feature_id = data.get('id')
             if feature_id:
-                module = ProductFeature.objects.get(id=feature_id)
+                module = records.get(id=feature_id)
             elif data.get('Feature_Id'):
-                module = ProductFeature.objects.get(Feature_Id=data.get('Feature_Id'))
+                module = records.get(Feature_Id=data.get('Feature_Id'))
             else:
                 raise Exception("id or Feature_Id is required for delete")
             serialize = ProductFeatureSerializer(module, {"Is_Deleted": True}, partial=True)
@@ -501,9 +509,41 @@ class ProductFeatureCRUD(APIView):
                 return HttpResponse(output, content_type="application/json", status=status.HTTP_200_OK)
             output = JSONRenderer().render(serialize.errors)
             return HttpResponse(output, content_type="application/json", status=status.HTTP_400_BAD_REQUEST)
+        except ValidationError:
+            raise
+        except ProductFeature.DoesNotExist:
+            return Response({'detail': 'Record not found.'}, status=status.HTTP_404_NOT_FOUND)
         except Exception as e:
             output = JSONRenderer().render({"Error": str(e)})
             return HttpResponse(output, content_type="application/json", status=status.HTTP_400_BAD_REQUEST)
+
+
+def catalog_query_id(params, field):
+    value = params.get(field)
+    if value is None:
+        return None
+    value = str(value)
+    if not re.fullmatch(r"[0-9]{1,19}", value) or not 0 < int(value) <= 9223372036854775807:
+        raise ValidationError({field: "Enter a positive numeric ID."})
+    return int(value)
+
+
+def catalog_product_scope(queryset, params):
+    product_id = catalog_query_id(params, 'Product_Id')
+    if product_id is None:
+        return queryset
+    return queryset.filter(Product_Id_id=product_id)
+
+
+def catalog_feature_scope(queryset, params):
+    queryset = catalog_product_scope(queryset, params)
+    module_id = catalog_query_id(params, 'Module_Id')
+    if module_id is not None:
+        queryset = queryset.filter(
+            Module_Id_id=module_id, Module_Id__Is_Deleted=False,
+            Module_Id__Product_Id_id=F('Product_Id_id'),
+        )
+    return queryset
 
 
 class ProductFeatureListwithPagination(ListAPIView):
@@ -511,11 +551,10 @@ class ProductFeatureListwithPagination(ListAPIView):
     serializer_class = ProductFeatureSerializer
 
     def get_queryset(self):
-        try:
-            module = ProductFeature.objects.filter(Q(Is_Deleted=False)).order_by('-id')
-            return module
-        except Exception as e:
-            raise Exception(f"Error while fetching ProductFeature: {str(e)}")
+        return catalog_feature_scope(
+            ProductFeature.objects.filter(Is_Deleted=False), self.request.query_params
+        ).order_by('-id')
+
 
 
 class ProductFeatureSearch(ListAPIView):
@@ -544,17 +583,19 @@ class ProductFeatureSearch(ListAPIView):
 class ProductFeaturelistwithoutpaginaton(APIView):
     def get(self, request, *args, **kwargs):
         try:
-            product_id = request.query_params.get('Product_Id') or request.query_params.get('product')
-            qs = ProductFeature.objects.filter(Is_Deleted=False)
-            if product_id:
-                if str(product_id).isdigit():
-                    qs = qs.filter(Product_Id_id=int(product_id))
+            qs = catalog_feature_scope(ProductFeature.objects.filter(Is_Deleted=False), request.query_params)
+            product = request.query_params.get('product')
+            if product and 'Product_Id' not in request.query_params:
+                if product.isascii() and product.isdecimal():
+                    qs = qs.filter(Product_Id_id=int(product))
                 else:
-                    qs = qs.filter(Q(Product_Id__Product_Code__iexact=product_id) | Q(Product_Id__Product_Name__iexact=product_id))
+                    qs = qs.filter(Q(Product_Id__Product_Code__iexact=product) | Q(Product_Id__Product_Name__iexact=product))
             module = qs.order_by('-id')
             serialize = ProductFeatureSerializer(module, many=True)
             output = JSONRenderer().render(serialize.data)
             return HttpResponse(output, content_type='application/json', status=status.HTTP_200_OK)
+        except ValidationError:
+            raise
         except Exception as e:
             output = JSONRenderer().render({"Error": str(e)})
             return HttpResponse(output, content_type="application/json", status=status.HTTP_400_BAD_REQUEST)
@@ -1193,13 +1234,14 @@ class ProductEditionCRUD(APIView):
     def get(self, request, *args, **kwargs):
         try:
             data = request.query_params
+            editions = catalog_product_scope(ProductEdition.objects.filter(Is_Deleted=False), data)
             edition_id = data.get('id')
             if edition_id:
-                module = ProductEdition.objects.get(id=edition_id)
+                module = editions.get(id=edition_id)
             elif data.get('Edition_Id'):
-                module = ProductEdition.objects.get(Edition_Id=data.get('Edition_Id'))
+                module = editions.get(Edition_Id=data.get('Edition_Id'))
             elif data.get('Edition_Code'):
-                module = ProductEdition.objects.get(Edition_Code=data.get('Edition_Code'))
+                module = editions.get(Edition_Code=data.get('Edition_Code'))
             else:
                 raise Exception("id or Edition_Id or Edition_Code parameter is required")
             serialize = ProductEditionSerializer(module)
@@ -1284,11 +1326,18 @@ class ProductEditionListwithPagination(ListAPIView):
     serializer_class = ProductEditionSerializer
 
     def get_queryset(self):
-        try:
-            module = ProductEdition.objects.filter(Q(Is_Deleted=False)).order_by('-id')
-            return module
-        except Exception as e:
-            raise Exception(f"Error while fetching ProductEdition: {str(e)}")
+        params = self.request.query_params
+        qs = catalog_product_scope(ProductEdition.objects.filter(Is_Deleted=False), params)
+        for field in ('Edition_Name', 'Edition_Code'):
+            if params.get(field):
+                qs = qs.filter(**{field + '__icontains': params[field]})
+        if 'Is_Active' in params:
+            active = params['Is_Active'].lower()
+            if active not in ('true', 'false'):
+                raise ValidationError({'Is_Active': 'Enter true or false.'})
+            qs = qs.filter(Is_Active=active == 'true')
+        return qs.order_by('-id')
+
 
 
 class ProductEditionSearch(ListAPIView):
@@ -1318,17 +1367,19 @@ class ProductEditionSearch(ListAPIView):
 class ProductEditionlistwithoutpaginaton(APIView):
     def get(self, request, *args, **kwargs):
         try:
-            product_id = request.query_params.get('Product_Id') or request.query_params.get('product')
-            qs = ProductEdition.objects.filter(Is_Deleted=False)
-            if product_id:
-                if str(product_id).isdigit():
-                    qs = qs.filter(Product_Id_id=int(product_id))
+            qs = catalog_product_scope(ProductEdition.objects.filter(Is_Deleted=False), request.query_params)
+            product = request.query_params.get('product')
+            if product and 'Product_Id' not in request.query_params:
+                if product.isascii() and product.isdecimal():
+                    qs = qs.filter(Product_Id_id=int(product))
                 else:
-                    qs = qs.filter(Q(Product_Id__Product_Code__iexact=product_id) | Q(Product_Id__Product_Name__iexact=product_id))
+                    qs = qs.filter(Q(Product_Id__Product_Code__iexact=product) | Q(Product_Id__Product_Name__iexact=product))
             module = qs.order_by('-id')
             serialize = ProductEditionSerializer(module, many=True)
             output = JSONRenderer().render(serialize.data)
             return HttpResponse(output, content_type='application/json', status=status.HTTP_200_OK)
+        except ValidationError:
+            raise
         except Exception as e:
             output = JSONRenderer().render({"Error": str(e)})
             return HttpResponse(output, content_type="application/json", status=status.HTTP_400_BAD_REQUEST)
@@ -7104,36 +7155,64 @@ class PlanFeatures(ListAPIView):
 
 class ModuleMasterCRUD(APIView):
     def post(self, request, *args, **kwargs):
+        data = request.data
+        if not data.get('Product_Id'):
+            return Response({'Product_Id': 'This field is required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        features = data.get('features', [])
+        if not isinstance(features, list) or any(not isinstance(feature, dict) for feature in features):
+            return Response({'features': 'Provide a list of feature objects.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        serializer = ModuleMasterSerializer(data=data)
+        serializer.is_valid(raise_exception=True)
         try:
-            data = request.data
-            serialize = ModuleMasterSerializer(data=data)
-            if serialize.is_valid():
-                serialize.save()
-                output = JSONRenderer().render(serialize.data)
-                return HttpResponse(output, content_type="application/json", status=status.HTTP_200_OK)
-            output = JSONRenderer().render(serialize.errors)
-            return HttpResponse(output, content_type="application/json", status=status.HTTP_400_BAD_REQUEST)
-        except Exception as e:
-            output = JSONRenderer().render({"Error": str(e)})
-            return HttpResponse(output, content_type="application/json", status=status.HTTP_400_BAD_REQUEST)
+            with transaction.atomic():
+                module = serializer.save()
+                for index, draft in enumerate(features):
+                    feature = ProductFeatureSerializer(data={
+                        **{field: draft[field] for field in ('Feature_Name', 'Description', 'Is_Active', 'Edition_Ids') if field in draft},
+                        'Product_Id': module.Product_Id_id,
+                        'Module_Id': module.pk,
+                    })
+                    if not str(draft.get('Feature_Name') or '').strip():
+                        raise ValidationError({'features': {index + 1: {'Feature_Name': 'Enter a feature name.'}}})
+                    if not feature.is_valid():
+                        raise ValidationError({'features': {index + 1: feature.errors}})
+                    feature.save()
+                result = serializer.data
+        except ProgrammingError as error:
+            cause = error.__cause__
+            table = ProductFeature._meta.get_field('Edition_Ids').remote_field.through._meta.db_table
+            if getattr(cause, 'pgcode', None) != '42P01' or f'"{table}"' not in str(cause):
+                raise
+            return Response(
+                {'detail': 'Feature edition storage is missing. Run install_catalog_ownership on the API database.'},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        return Response(result)
 
     def get(self, request, *args, **kwargs):
         try:
             data = request.query_params
+            records = catalog_product_scope(ModuleMaster.objects.filter(Is_Deleted=False), data)
             mod_id = data.get('id')
             if mod_id:
-                module = ModuleMaster.objects.get(id=mod_id)
+                module = records.get(id=mod_id)
             elif data.get('ModuleMasterId'):
-                module = ModuleMaster.objects.get(ModuleMasterId=data.get('ModuleMasterId'))
+                module = records.get(ModuleMasterId=data.get('ModuleMasterId'))
             elif data.get('Module_Code'):
-                module = ModuleMaster.objects.get(Module_Code=data.get('Module_Code'))
+                module = records.get(Module_Code=data.get('Module_Code'))
             elif data.get('Module_key'):
-                module = ModuleMaster.objects.get(Module_key=data.get('Module_key'))
+                module = records.get(Module_key=data.get('Module_key'))
             else:
                 raise Exception("id or ModuleMasterId or Module_Code parameter is required")
             serialize = ModuleMasterSerializer(module)
             output = JSONRenderer().render(serialize.data)
             return HttpResponse(output, content_type="application/json", status=status.HTTP_200_OK)
+        except ValidationError:
+            raise
+        except ModuleMaster.DoesNotExist:
+            return Response({'detail': 'Record not found.'}, status=status.HTTP_404_NOT_FOUND)
         except Exception as e:
             output = JSONRenderer().render({"Error": str(e)})
             return HttpResponse(output, content_type="application/json", status=status.HTTP_400_BAD_REQUEST)
@@ -7183,11 +7262,12 @@ class ModuleMasterCRUD(APIView):
     def delete(self, request, *args, **kwargs):
         try:
             data = request.query_params if request.query_params.get('id') else request.data
+            records = catalog_product_scope(ModuleMaster.objects.filter(Is_Deleted=False), data)
             mod_id = data.get('id')
             if mod_id:
-                module = ModuleMaster.objects.get(id=mod_id)
+                module = records.get(id=mod_id)
             elif data.get('ModuleMasterId'):
-                module = ModuleMaster.objects.get(ModuleMasterId=data.get('ModuleMasterId'))
+                module = records.get(ModuleMasterId=data.get('ModuleMasterId'))
             else:
                 raise Exception("id or ModuleMasterId is required for delete")
             serialize = ModuleMasterSerializer(module, {"Is_Deleted": True}, partial=True)
@@ -7197,6 +7277,10 @@ class ModuleMasterCRUD(APIView):
                 return HttpResponse(output, content_type="application/json", status=status.HTTP_200_OK)
             output = JSONRenderer().render(serialize.errors)
             return HttpResponse(output, content_type="application/json", status=status.HTTP_400_BAD_REQUEST)
+        except ValidationError:
+            raise
+        except ModuleMaster.DoesNotExist:
+            return Response({'detail': 'Record not found.'}, status=status.HTTP_404_NOT_FOUND)
         except Exception as e:
             output = JSONRenderer().render({"Error": str(e)})
             return HttpResponse(output, content_type="application/json", status=status.HTTP_400_BAD_REQUEST)
@@ -7207,11 +7291,10 @@ class ModuleMasterListwithPagination(ListAPIView):
     serializer_class = ModuleMasterSerializer
 
     def get_queryset(self):
-        try:
-            module = ModuleMaster.objects.filter(Q(Is_Deleted=False)).order_by('-id')
-            return module
-        except Exception as e:
-            raise Exception(f"Error while fetching ModuleMaster: {str(e)}")
+        return catalog_product_scope(
+            ModuleMaster.objects.filter(Is_Deleted=False), self.request.query_params
+        ).order_by('-id')
+
 
 
 class ModuleMasterSearch(ListAPIView):
@@ -7245,12 +7328,24 @@ class ModuleMasterlistwithoutpaginaton(APIView):
         try:
             product = request.query_params.get('product') or request.query_params.get('Product')
             qs = ModuleMaster.objects.filter(Is_Deleted=False)
-            if product:
+            edition_product = request.query_params.get('edition_product')
+            if 'Product_Id' in request.query_params:
+                qs = catalog_product_scope(qs, request.query_params)
+            elif edition_product is not None:
+                if not edition_product.isdigit():
+                    return Response({'detail': 'A numeric product ID is required.'}, status=400)
+                qs = qs.filter(
+                    Product_Edition_id__Product_Id_id=edition_product,
+                    Product_Edition_id__Is_Deleted=False,
+                ).distinct().prefetch_related('Product_Edition_id', 'ProductFeature_id')
+            elif product:
                 qs = qs.filter(Product__icontains=product)
             module = qs.order_by('-id')
             serialize = ModuleMasterSerializer(module, many=True)
             output = JSONRenderer().render(serialize.data)
             return HttpResponse(output, content_type='application/json', status=status.HTTP_200_OK)
+        except ValidationError:
+            raise
         except Exception as e:
             output = JSONRenderer().render({"Error": str(e)})
             return HttpResponse(output, content_type="application/json", status=status.HTTP_400_BAD_REQUEST)
