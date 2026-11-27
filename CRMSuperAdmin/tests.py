@@ -1015,3 +1015,175 @@ class TrialConfigurationTests(SimpleTestCase):
         self.assertEqual(len(body["cards"]), 4)
 
 
+class ModuleMasterLookupsAPITests(SimpleTestCase):
+    """Tests for ModuleMasterLookupsAPIView filtering by Category & Product without pagination."""
+
+    def setUp(self):
+        self.factory = APIRequestFactory()
+        self.user = SimpleNamespace(is_authenticated=True, pk=1, id=1)
+
+    def test_module_master_lookups_url_resolves(self):
+        from CRMSuperAdmin.views import ModuleMasterLookupsAPIView
+
+        url = reverse("module-master-lookups", kwargs={"tenant_name": "default"})
+        self.assertEqual(url, "/default/superadmin/ModuleMasterLookups/")
+        self.assertEqual(resolve(url).func.view_class, ModuleMasterLookupsAPIView)
+
+    @patch("CRMSuperAdmin.views.ModuleMaster")
+    def test_filters_by_category_and_product_using_icontains_without_pagination(self, mock_mm):
+        import json
+        from CRMSuperAdmin.views import ModuleMasterLookupsAPIView
+
+        cat = SimpleNamespace(id=3, Category_Name="Business Suite")
+        prod = SimpleNamespace(id=5, Product_Code="CRM", Product_Name="Pegatto CRM", Category_id_id=3, Category_id=cat, Category="Business Suite")
+        mod = SimpleNamespace(
+            id=11,
+            ModuleMasterId="MOD000000011",
+            Module_Code="LEADS",
+            Module_name="Leads Management",
+            Module_Type="Core",
+            Module_key="leads",
+            Description="Lead tracking",
+            Status="Active",
+            Product_Id_id=5,
+            Product_Id=prod,
+            ProductCategory_id_id=3,
+            ProductCategory_id=cat,
+            ProductCategory="Business Suite",
+        )
+        qs = MagicMock()
+        qs.filter.return_value = qs
+        qs.distinct.return_value = qs
+        qs.order_by.return_value = qs
+        qs.__iter__.return_value = iter([mod])
+        mock_mm.objects.select_related.return_value = qs
+
+        req = self.factory.get(
+            "/default/superadmin/ModuleMasterLookups/",
+            {"Category_id": "3", "Category_Name": "Business", "Product_Id": "CRM"},
+        )
+        force_authenticate(req, user=self.user)
+        resp = ModuleMasterLookupsAPIView.as_view()(req, tenant_name="default")
+
+        self.assertEqual(resp.status_code, 200)
+        body = json.loads(resp.content)
+        self.assertTrue(body["status"])
+        self.assertEqual(body["count"], 1)
+        self.assertNotIn("next", body)
+        self.assertNotIn("previous", body)
+        self.assertEqual(body["results"][0]["Module_Name"], "Leads Management")
+        self.assertEqual(body["results"][0]["Product_id"], 5)
+        self.assertEqual(body["results"][0]["Category_id"], 3)
+        self.assertEqual(body["results"][0]["Category_Name"], "Business Suite")
+
+        filter_text = " ".join(str(c) for c in qs.filter.call_args_list)
+        self.assertIn("icontains", filter_text)
+        self.assertNotIn("iexact", filter_text)
+
+
+class EditionAndPlanLookupsAPITests(SimpleTestCase):
+    """Tests for ProductEditionLookupsAPIView and PlanLookupsAPIView."""
+
+    def setUp(self):
+        self.factory = APIRequestFactory()
+        self.user = SimpleNamespace(is_authenticated=True, pk=1, id=1)
+
+    def test_edition_and_plan_lookup_urls_resolve(self):
+        from CRMSuperAdmin.views import PlanLookupsAPIView, ProductEditionLookupsAPIView
+
+        ed_url = reverse("product-edition-lookups", kwargs={"tenant_name": "default"})
+        pl_url = reverse("plan-lookups", kwargs={"tenant_name": "default"})
+        self.assertEqual(ed_url, "/default/superadmin/ProductEditionLookups/")
+        self.assertEqual(pl_url, "/default/superadmin/PlanLookups/")
+        self.assertEqual(resolve(ed_url).func.view_class, ProductEditionLookupsAPIView)
+        self.assertEqual(resolve(pl_url).func.view_class, PlanLookupsAPIView)
+
+    @patch("CRMSuperAdmin.views.ProductEdition")
+    def test_product_edition_lookups_filters_by_product_using_icontains(self, mock_ed):
+        import json
+        from CRMSuperAdmin.views import ProductEditionLookupsAPIView
+
+        prod = SimpleNamespace(id=5, Product_Code="CRM", Product_Name="Pegatto CRM")
+        ed = SimpleNamespace(
+            id=10,
+            Edition_Id="PED000000010",
+            Edition_Code="PRO",
+            Edition_Name="Professional",
+            Description="Pro edition",
+            Product_Id_id=5,
+            Product_Id=prod,
+        )
+        qs = MagicMock()
+        qs.filter.return_value = qs
+        qs.order_by.return_value = qs
+        qs.__iter__.return_value = iter([ed])
+        mock_ed.objects.select_related.return_value = qs
+
+        req = self.factory.get("/default/superadmin/ProductEditionLookups/", {"Product_Id": "CRM"})
+        force_authenticate(req, user=self.user)
+        resp = ProductEditionLookupsAPIView.as_view()(req, tenant_name="default")
+
+        self.assertEqual(resp.status_code, 200)
+        body = json.loads(resp.content)
+        self.assertTrue(body["status"])
+        self.assertEqual(body["count"], 1)
+        self.assertEqual(body["results"][0]["Edition_Name"], "Professional")
+        self.assertEqual(body["results"][0]["Product_id"], 5)
+        filter_text = " ".join(str(c) for c in qs.filter.call_args_list)
+        self.assertIn("icontains", filter_text)
+        self.assertNotIn("iexact", filter_text)
+
+    @patch("CRMSuperAdmin.views.Plan")
+    def test_plan_lookups_filters_by_edition_using_icontains(self, mock_plan):
+        import json
+        from CRMSuperAdmin.views import PlanLookupsAPIView
+
+        prod = SimpleNamespace(id=5, Product_Code="CRM", Product_Name="Pegatto CRM")
+        ed = SimpleNamespace(
+            id=10,
+            Edition_Id="PED000000010",
+            Edition_Code="PRO",
+            Edition_Name="Professional",
+            Product_Id_id=5,
+            Product_Id=prod,
+        )
+        plan = SimpleNamespace(
+            id=22,
+            Plan_Id="PLN000022",
+            Plan_Name="CRM Pro Monthly",
+            Description="Pro plan",
+            Plantype="Paid",
+            billing_cycle="monthly",
+            Currency_Type="INR",
+            UnitPrice=1999.0,
+            TotalAmount=2358.82,
+            ProductEdition_id_id=10,
+            ProductEdition_id=ed,
+            ProductEdition_Name="Professional",
+            Product_id=5,
+            Product=prod,
+        )
+        qs = MagicMock()
+        qs.filter.return_value = qs
+        qs.order_by.return_value = qs
+        qs.__iter__.return_value = iter([plan])
+        mock_plan.objects.select_related.return_value = qs
+
+        req = self.factory.get("/default/superadmin/PlanLookups/", {"ProductEdition_id": "Professional"})
+        force_authenticate(req, user=self.user)
+        resp = PlanLookupsAPIView.as_view()(req, tenant_name="default")
+
+        self.assertEqual(resp.status_code, 200)
+        body = json.loads(resp.content)
+        self.assertTrue(body["status"])
+        self.assertEqual(body["count"], 1)
+        self.assertEqual(body["results"][0]["Plan_Name"], "CRM Pro Monthly")
+        self.assertEqual(body["results"][0]["Edition_Name"], "Professional")
+        self.assertEqual(body["results"][0]["ProductEdition_id"], 10)
+        filter_text = " ".join(str(c) for c in qs.filter.call_args_list)
+        self.assertIn("icontains", filter_text)
+        self.assertNotIn("iexact", filter_text)
+
+
+
+

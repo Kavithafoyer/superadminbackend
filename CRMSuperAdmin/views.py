@@ -1863,6 +1863,329 @@ class ProductMasterLookupsAPIView(APIView):
             )
 
 
+class ModuleMasterLookupsAPIView(APIView):
+    """Return unpaginated ModuleMaster lookup list filtered by Category and/or Product."""
+
+    def get(self, request, *args, **kwargs):
+        try:
+            modules = (
+                ModuleMaster.objects.select_related(
+                    'Product_Id',
+                    'Product_Id__Category_id',
+                    'ProductCategory_id',
+                )
+                .filter(Is_Deleted=False, Is_active=True)
+                .order_by('id')
+            )
+
+            category_id = request.query_params.get('Category_id') or request.query_params.get('category_id')
+            category_name = request.query_params.get('Category_Name') or request.query_params.get('category_name')
+            product_id = (
+                request.query_params.get('Product_Id')
+                or request.query_params.get('product_id')
+                or request.query_params.get('Product')
+            )
+            product_code = request.query_params.get('Product_Code') or request.query_params.get('product_code')
+            product_name = request.query_params.get('Product_Name') or request.query_params.get('product_name')
+            search = request.query_params.get('search')
+
+            if category_id and str(category_id).strip().isdigit():
+                cat_pk = int(str(category_id).strip())
+                modules = modules.filter(
+                    Q(Product_Id__Category_id_id=cat_pk)
+                    | Q(ProductCategory_id_id=cat_pk)
+                )
+            elif category_id:
+                cat_code = str(category_id).strip()
+                modules = modules.filter(
+                    Q(Product_Id__Category_id__Category_Id__icontains=cat_code)
+                    | Q(Product_Id__Category_id__Category_Code__icontains=cat_code)
+                    | Q(ProductCategory_id__Category_Id__icontains=cat_code)
+                    | Q(ProductCategory_id__Category_Code__icontains=cat_code)
+                )
+
+            if category_name:
+                cat_txt = str(category_name).strip()
+                modules = modules.filter(
+                    Q(Product_Id__Category_id__Category_Name__icontains=cat_txt)
+                    | Q(ProductCategory_id__Category_Name__icontains=cat_txt)
+                    | Q(ProductCategory__icontains=cat_txt)
+                )
+
+            if product_id:
+                p_txt = str(product_id).strip()
+                if p_txt.isdigit():
+                    p_pk = int(p_txt)
+                    modules = modules.filter(
+                        Q(Product_Id_id=p_pk)
+                        | Q(Product_Edition_id__Product_Id_id=p_pk)
+                    ).distinct()
+                else:
+                    modules = modules.filter(
+                        Q(Product_Id__Product_Code__icontains=p_txt)
+                        | Q(Product_Id__Product_Name__icontains=p_txt)
+                        | Q(Product_Edition_id__Product_Id__Product_Code__icontains=p_txt)
+                        | Q(Product_Edition_id__Product_Id__Product_Name__icontains=p_txt)
+                    ).distinct()
+
+            if product_code:
+                pc_txt = str(product_code).strip()
+                modules = modules.filter(
+                    Q(Product_Id__Product_Code__icontains=pc_txt)
+                    | Q(Product_Edition_id__Product_Id__Product_Code__icontains=pc_txt)
+                ).distinct()
+
+            if product_name:
+                pn_txt = str(product_name).strip()
+                modules = modules.filter(
+                    Q(Product_Id__Product_Name__icontains=pn_txt)
+                    | Q(Product_Edition_id__Product_Id__Product_Name__icontains=pn_txt)
+                ).distinct()
+
+            if search:
+                s_txt = str(search).strip()
+                modules = modules.filter(
+                    Q(Module_name__icontains=s_txt)
+                    | Q(Module_Code__icontains=s_txt)
+                    | Q(ModuleMasterId__icontains=s_txt)
+                    | Q(Module_key__icontains=s_txt)
+                    | Q(Module_Type__icontains=s_txt)
+                )
+
+            results = []
+            for m in modules:
+                prod = getattr(m, 'Product_Id', None)
+                cat = getattr(m, 'ProductCategory_id', None) or (getattr(prod, 'Category_id', None) if prod else None)
+                cat_id_val = m.ProductCategory_id_id or (prod.Category_id_id if prod else None)
+                cat_name_val = (
+                    (cat.Category_Name if cat else None)
+                    or m.ProductCategory
+                    or (prod.Category if prod else None)
+                )
+                results.append(
+                    {
+                        "id": m.id,
+                        "ModuleMasterId": m.ModuleMasterId,
+                        "Module_Name": m.Module_name,
+                        "Module_Type": m.Module_Type,
+                        "Description": m.Description,
+                        "Status": m.Status,
+                        "Product_id": m.Product_Id_id,
+                        "Product_Code": prod.Product_Code if prod else None,
+                        "Product_Name": prod.Product_Name if prod else None,
+                        "Category_id": cat_id_val,
+                        "Category_Name": cat_name_val,
+                    }
+                )
+
+            return HttpResponse(
+                JSONRenderer().render({"status": True, "results": results, "count": len(results)}),
+                content_type='application/json'
+            )
+        except Exception as e:
+            return HttpResponse(
+                JSONRenderer().render({"status": False, "Error": str(e)}),
+                content_type='application/json',
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+
+class ProductEditionLookupsAPIView(APIView):
+    """Return unpaginated ProductEdition dropdown list filtered by Product."""
+
+    def get(self, request, *args, **kwargs):
+        try:
+            editions = (
+                ProductEdition.objects.select_related('Product_Id')
+                .filter(Is_Deleted=False, Is_Active=True)
+                .order_by('id')
+            )
+
+            product_id = (
+                request.query_params.get('Product_Id')
+                or request.query_params.get('product_id')
+                or request.query_params.get('Product')
+            )
+            product_code = request.query_params.get('Product_Code') or request.query_params.get('product_code')
+            product_name = request.query_params.get('Product_Name') or request.query_params.get('product_name')
+            search = request.query_params.get('search')
+
+            if product_id:
+                p_txt = str(product_id).strip()
+                if p_txt.isdigit():
+                    editions = editions.filter(Product_Id_id=int(p_txt))
+                else:
+                    editions = editions.filter(
+                        Q(Product_Id__Product_Code__icontains=p_txt)
+                        | Q(Product_Id__Product_Name__icontains=p_txt)
+                    )
+
+            if product_code:
+                editions = editions.filter(
+                    Product_Id__Product_Code__icontains=str(product_code).strip()
+                )
+
+            if product_name:
+                editions = editions.filter(
+                    Product_Id__Product_Name__icontains=str(product_name).strip()
+                )
+
+            if search:
+                s_txt = str(search).strip()
+                editions = editions.filter(
+                    Q(Edition_Id__icontains=s_txt)
+                    | Q(Edition_Code__icontains=s_txt)
+                    | Q(Edition_Name__icontains=s_txt)
+                    | Q(Description__icontains=s_txt)
+                    | Q(Product_Id__Product_Name__icontains=s_txt)
+                    | Q(Product_Id__Product_Code__icontains=s_txt)
+                )
+
+            results = []
+            for ed in editions:
+                prod = getattr(ed, 'Product_Id', None)
+                results.append(
+                    {
+                        "id": ed.id,
+                        "Edition_Id": ed.Edition_Id,
+                        "Edition_Code": ed.Edition_Code,
+                        "Edition_Name": ed.Edition_Name,
+                        "Description": ed.Description,
+                        "Product_id": ed.Product_Id_id,
+                        "Product_Code": prod.Product_Code if prod else None,
+                        "Product_Name": prod.Product_Name if prod else None,
+                    }
+                )
+
+            return HttpResponse(
+                JSONRenderer().render({"status": True, "results": results, "count": len(results)}),
+                content_type='application/json'
+            )
+        except Exception as e:
+            return HttpResponse(
+                JSONRenderer().render({"status": False, "Error": str(e)}),
+                content_type='application/json',
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+
+class PlanLookupsAPIView(APIView):
+    """Return unpaginated Plan dropdown list filtered by ProductEdition (and optional Product)."""
+
+    def get(self, request, *args, **kwargs):
+        try:
+            plans = (
+                Plan.objects.select_related('Product', 'ProductEdition_id', 'ProductEdition_id__Product_Id')
+                .filter(Is_Deleted=False, Is_Active_Flg=True)
+                .order_by('id')
+            )
+
+            edition_id = (
+                request.query_params.get('ProductEdition_id')
+                or request.query_params.get('Edition_Id')
+                or request.query_params.get('edition_id')
+                or request.query_params.get('Edition')
+            )
+            edition_code = request.query_params.get('Edition_Code') or request.query_params.get('edition_code')
+            edition_name = (
+                request.query_params.get('Edition_Name')
+                or request.query_params.get('edition_name')
+                or request.query_params.get('ProductEdition_Name')
+            )
+            product_id = (
+                request.query_params.get('Product_Id')
+                or request.query_params.get('product_id')
+                or request.query_params.get('Product')
+            )
+            search = request.query_params.get('search')
+
+            if edition_id:
+                e_txt = str(edition_id).strip()
+                if e_txt.isdigit():
+                    plans = plans.filter(ProductEdition_id_id=int(e_txt))
+                else:
+                    plans = plans.filter(
+                        Q(ProductEdition_id__Edition_Id__icontains=e_txt)
+                        | Q(ProductEdition_id__Edition_Code__icontains=e_txt)
+                        | Q(ProductEdition_id__Edition_Name__icontains=e_txt)
+                        | Q(ProductEdition_Name__icontains=e_txt)
+                    )
+
+            if edition_code:
+                plans = plans.filter(
+                    ProductEdition_id__Edition_Code__icontains=str(edition_code).strip()
+                )
+
+            if edition_name:
+                en_txt = str(edition_name).strip()
+                plans = plans.filter(
+                    Q(ProductEdition_id__Edition_Name__icontains=en_txt)
+                    | Q(ProductEdition_Name__icontains=en_txt)
+                )
+
+            if product_id:
+                p_txt = str(product_id).strip()
+                if p_txt.isdigit():
+                    p_pk = int(p_txt)
+                    plans = plans.filter(
+                        Q(Product_id=p_pk) | Q(ProductEdition_id__Product_Id_id=p_pk)
+                    )
+                else:
+                    plans = plans.filter(
+                        Q(Product__Product_Code__icontains=p_txt)
+                        | Q(Product__Product_Name__icontains=p_txt)
+                        | Q(ProductEdition_id__Product_Id__Product_Code__icontains=p_txt)
+                        | Q(ProductEdition_id__Product_Id__Product_Name__icontains=p_txt)
+                    )
+
+            if search:
+                s_txt = str(search).strip()
+                plans = plans.filter(
+                    Q(Plan_Id__icontains=s_txt)
+                    | Q(Plan_Name__icontains=s_txt)
+                    | Q(Description__icontains=s_txt)
+                    | Q(ProductEdition_Name__icontains=s_txt)
+                    | Q(ProductEdition_id__Edition_Name__icontains=s_txt)
+                    | Q(Product__Product_Name__icontains=s_txt)
+                )
+
+            results = []
+            for p in plans:
+                ed = getattr(p, 'ProductEdition_id', None)
+                prod = getattr(p, 'Product', None) or (getattr(ed, 'Product_Id', None) if ed else None)
+                results.append(
+                    {
+                        "id": p.id,
+                        "Plan_Id": p.Plan_Id,
+                        "Plan_Name": p.Plan_Name,
+                        "Description": p.Description,
+                        "Plantype": p.Plantype,
+                        "billing_cycle": p.billing_cycle,
+                        "Currency_Type": p.Currency_Type,
+                        "UnitPrice": p.UnitPrice,
+                        "TotalAmount": p.TotalAmount,
+                        "ProductEdition_id": p.ProductEdition_id_id,
+                        "Edition_Id": ed.Edition_Id if ed else None,
+                        "Edition_Code": ed.Edition_Code if ed else None,
+                        "Edition_Name": (ed.Edition_Name if ed else None) or p.ProductEdition_Name,
+                        "Product_id": p.Product_id or (ed.Product_Id_id if ed else None),
+                        "Product_Code": prod.Product_Code if prod else None,
+                        "Product_Name": prod.Product_Name if prod else None,
+                    }
+                )
+
+            return HttpResponse(
+                JSONRenderer().render({"status": True, "results": results, "count": len(results)}),
+                content_type='application/json'
+            )
+        except Exception as e:
+            return HttpResponse(
+                JSONRenderer().render({"status": False, "Error": str(e)}),
+                content_type='application/json',
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+
 class AddonLookupsAPIView(APIView):
     """
     Returns available Product and Tax lookups for Addon creation/editing from ProductMaster (or Userlookup fallback).
