@@ -665,4 +665,8 @@ path('TrialConfigurationSearch/', TrialConfigurationSearch.as_view(), name='tria
 path('TrialConfigurationlistwithoutpaginaton/', TrialConfigurationlistwithoutpaginaton.as_view(), name='trial-configuration-list-without-pagination'),
 path('TrialConfigurationFilter/', TrialConfigurationFilter.as_view(), name='trial-configuration-filter'),
 path('TrialConfigurationKPI/', TrialConfigurationKPIAPI.as_view(), name='trial-configuration-kpi'),
+
+
+path('ProductMasterdropdownlist/', ProductMasterdropdownlist.as_view(), name='product-master-dropdown-list'),
+
 ]
