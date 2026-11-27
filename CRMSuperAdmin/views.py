@@ -18560,6 +18560,1351 @@ class PartnerAssignMailAPI(APIView):
             return json_response({"Error": str(e)}, status.HTTP_400_BAD_REQUEST)
 
 
+# ========================================== License & Entitlement Management =========================================== #
+
+def _parse_bool_flag(raw_val):
+    if isinstance(raw_val, bool):
+        return raw_val
+    if raw_val is None:
+        return None
+    text = str(raw_val).strip().lower()
+    if text in ("true", "1", "yes"):
+        return True
+    if text in ("false", "0", "no"):
+        return False
+    return None
+
+
+def _paginate_queryset(queryset, serializer_cls, page=1, page_size=None):
+    size = int(page_size or REST_FRAMEWORK.get("PAGE_SIZE", 10) or 10)
+    page_num = max(1, int(page or 1))
+    startval = (page_num - 1) * size
+    endval = page_num * size
+    count = queryset.count()
+    items = queryset[startval:endval]
+    results = json.loads(JSONRenderer().render(serializer_cls(items, many=True).data))
+    return HttpResponse(
+        JSONRenderer().render({"count": count, "page": page_num, "results": results}),
+        content_type="application/json",
+        status=status.HTTP_200_OK,
+    )
+
+
+def _sync_license_assigned_users(license_obj):
+    if not license_obj:
+        return
+    agg = (
+        LicenseAssignment.objects.filter(
+            License_Id=license_obj,
+            Is_Deleted=False,
+        )
+        .filter(Q(Is_Active=True) | Q(Status__icontains="Active"))
+        .aggregate(total=Sum("Seats_Allocated"))
+    )
+    license_obj.Assigned_Users = int(agg.get("total") or 0)
+    license_obj.save(update_fields=["Assigned_Users", "Updated_Date"])
+
+
+def _apply_license_scope(qs, params):
+    """Apply ProductCategory-style ORM filtering (all strings via icontains) on LicenseMaster."""
+    if not params:
+        return qs
+
+    today = timezone.localdate()
+    expiring_cutoff = today + timedelta(days=30)
+
+    product_val = params.get("Product_Id") or params.get("Product") or params.get("product_id")
+    if product_val and str(product_val).strip().lower() not in ("all", "all products"):
+        p_txt = str(product_val).strip()
+        if p_txt.isdigit():
+            qs = qs.filter(Product_Id_id=int(p_txt))
+        else:
+            qs = qs.filter(
+                Q(Product_Id__Product_Code__icontains=p_txt)
+                | Q(Product_Id__Product_Name__icontains=p_txt)
+                | Q(Product_Name__icontains=p_txt)
+            )
+
+    plan_edition_val = (
+        params.get("Plan_Edition")
+        or params.get("Plan_Id")
+        or params.get("ProductEdition_id")
+        or params.get("Edition_Id")
+        or params.get("plan_id")
+    )
+    if plan_edition_val and str(plan_edition_val).strip().lower() not in ("all", "all plans", "all editions"):
+        pe_txt = str(plan_edition_val).strip()
+        if pe_txt.isdigit():
+            qs = qs.filter(Q(Plan_Id_id=int(pe_txt)) | Q(ProductEdition_id_id=int(pe_txt)))
+        else:
+            qs = qs.filter(
+                Q(Plan_Edition_Name__icontains=pe_txt)
+                | Q(Plan_Id__Plan_Name__icontains=pe_txt)
+                | Q(Plan_Id__Plan_Id__icontains=pe_txt)
+                | Q(ProductEdition_id__Edition_Name__icontains=pe_txt)
+                | Q(ProductEdition_id__Edition_Code__icontains=pe_txt)
+            )
+
+    status_val = params.get("License_Status") or params.get("Status") or params.get("status")
+    if status_val and str(status_val).strip().lower() not in ("all", "all status", "all statuses"):
+        s_txt = str(status_val).strip()
+        if "expiring" in s_txt.lower():
+            qs = qs.filter(
+                Q(Status__icontains="Expiring")
+                | (
+                    Q(Valid_To__gte=today, Valid_To__lte=expiring_cutoff)
+                    & Q(Status__icontains="Active")
+                )
+            )
+        else:
+            qs = qs.filter(Status__icontains=s_txt)
+
+    customer_val = params.get("Customer_Id") or params.get("Tenant") or params.get("tenant_id") or params.get("customer_id")
+    if customer_val and str(customer_val).strip().lower() not in ("all", "all tenants", "all customers"):
+        c_txt = str(customer_val).strip()
+        if c_txt.isdigit():
+            qs = qs.filter(Customer_Id_id=int(c_txt))
+        else:
+            qs = qs.filter(
+                Q(Customer_Id__Organization_Name__icontains=c_txt)
+                | Q(Customer_Id__Contact_Name__icontains=c_txt)
+                | Q(Customer_Id__Account_Id__icontains=c_txt)
+                | Q(Customer_Name__icontains=c_txt)
+            )
+
+    if params.get("License_Key"):
+        qs = qs.filter(License_Key__icontains=str(params.get("License_Key")).strip())
+
+    if params.get("License_Id"):
+        lic_txt = str(params.get("License_Id")).strip()
+        if lic_txt.isdigit():
+            qs = qs.filter(id=int(lic_txt))
+        else:
+            qs = qs.filter(License_Id__icontains=lic_txt)
+
+    if params.get("License_Type") and str(params.get("License_Type")).strip().lower() != "all":
+        qs = qs.filter(License_Type__icontains=str(params.get("License_Type")).strip())
+
+    is_active = _parse_bool_flag(params.get("Is_Active"))
+    if is_active is not None:
+        qs = qs.filter(Is_Active=is_active)
+
+    if params.get("Organization_Id") and str(params.get("Organization_Id")).isdigit():
+        qs = qs.filter(Organization_Id_id=int(params.get("Organization_Id")))
+
+    if params.get("Created_By") and str(params.get("Created_By")).isdigit():
+        qs = qs.filter(Created_By_id=int(params.get("Created_By")))
+
+    from_date = params.get("fromdate") or params.get("from_date")
+    to_date = params.get("todate") or params.get("to_date")
+    if from_date and to_date:
+        qs = qs.filter(Created_Date__date__range=[from_date, to_date])
+
+    search = params.get("search")
+    if search:
+        term = str(search).strip()
+        qs = qs.filter(
+            Q(License_Key__icontains=term)
+            | Q(License_Id__icontains=term)
+            | Q(Customer_Name__icontains=term)
+            | Q(Customer_Id__Organization_Name__icontains=term)
+            | Q(Customer_Id__Contact_Name__icontains=term)
+            | Q(Product_Name__icontains=term)
+            | Q(Product_Id__Product_Name__icontains=term)
+            | Q(Product_Id__Product_Code__icontains=term)
+            | Q(Plan_Edition_Name__icontains=term)
+            | Q(Plan_Id__Plan_Name__icontains=term)
+            | Q(ProductEdition_id__Edition_Name__icontains=term)
+            | Q(License_Type__icontains=term)
+            | Q(Status__icontains=term)
+        )
+
+    return qs
+
+
+class _ProductCategoryStyleCRUDView(APIView):
+    """Reusable ProductCategory-style CRUD APIView with icontains code lookup and soft delete."""
+
+    model_cls = None
+    serializer_cls = None
+    code_fields = ()
+    entity_label = "Record"
+    select_related_fields = ()
+    prefetch_related_fields = ()
+
+    def _get_object(self, data):
+        qs = self.model_cls.objects.all()
+        if self.select_related_fields:
+            qs = qs.select_related(*self.select_related_fields)
+        if self.prefetch_related_fields:
+            qs = qs.prefetch_related(*self.prefetch_related_fields)
+
+        pk_val = data.get("id")
+        if pk_val:
+            return qs.get(id=pk_val)
+        for code_field in self.code_fields:
+            val = data.get(code_field)
+            if val:
+                obj = qs.filter(**{f"{code_field}__icontains": str(val).strip()}).order_by("id").first()
+                if obj is None:
+                    raise self.model_cls.DoesNotExist(f"{self.entity_label} not found")
+                return obj
+        fields_hint = " or ".join(["id", *self.code_fields])
+        raise Exception(f"{fields_hint} parameter is required")
+
+    def _after_save(self, instance):
+        return None
+
+    def post(self, request, *args, **kwargs):
+        try:
+            serialize = self.serializer_cls(data=request.data)
+            if serialize.is_valid():
+                instance = serialize.save()
+                self._after_save(instance)
+                return HttpResponse(
+                    JSONRenderer().render(self.serializer_cls(instance).data),
+                    content_type="application/json",
+                    status=status.HTTP_200_OK,
+                )
+            return HttpResponse(
+                JSONRenderer().render(serialize.errors),
+                content_type="application/json",
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        except Exception as e:
+            return HttpResponse(
+                JSONRenderer().render({"Error": str(e)}),
+                content_type="application/json",
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+    def get(self, request, *args, **kwargs):
+        try:
+            obj = self._get_object(request.query_params)
+            serialize = self.serializer_cls(obj)
+            return HttpResponse(
+                JSONRenderer().render(serialize.data),
+                content_type="application/json",
+                status=status.HTTP_200_OK,
+            )
+        except Exception as e:
+            return HttpResponse(
+                JSONRenderer().render({"Error": str(e)}),
+                content_type="application/json",
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+    def put(self, request, *args, **kwargs):
+        try:
+            obj = self._get_object(request.data)
+            serialize = self.serializer_cls(instance=obj, data=request.data)
+            if serialize.is_valid():
+                instance = serialize.save()
+                self._after_save(instance)
+                return HttpResponse(
+                    JSONRenderer().render(self.serializer_cls(instance).data),
+                    content_type="application/json",
+                    status=status.HTTP_200_OK,
+                )
+            return HttpResponse(
+                JSONRenderer().render(serialize.errors),
+                content_type="application/json",
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        except Exception as e:
+            return HttpResponse(
+                JSONRenderer().render({"Error": str(e)}),
+                content_type="application/json",
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+    def patch(self, request, *args, **kwargs):
+        try:
+            obj = self._get_object(request.data)
+            serialize = self.serializer_cls(instance=obj, data=request.data, partial=True)
+            if serialize.is_valid():
+                instance = serialize.save()
+                self._after_save(instance)
+                return HttpResponse(
+                    JSONRenderer().render(self.serializer_cls(instance).data),
+                    content_type="application/json",
+                    status=status.HTTP_200_OK,
+                )
+            return HttpResponse(
+                JSONRenderer().render(serialize.errors),
+                content_type="application/json",
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        except Exception as e:
+            return HttpResponse(
+                JSONRenderer().render({"Error": str(e)}),
+                content_type="application/json",
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+    def delete(self, request, *args, **kwargs):
+        try:
+            has_qp = any(request.query_params.get(k) for k in ("id", *self.code_fields))
+            data = request.query_params if has_qp else request.data
+            obj = self._get_object(data)
+            serialize = self.serializer_cls(obj, {"Is_Deleted": True, "Is_Active": False}, partial=True)
+            if serialize.is_valid():
+                instance = serialize.save()
+                self._after_save(instance)
+                return HttpResponse(
+                    JSONRenderer().render(self.serializer_cls(instance).data),
+                    content_type="application/json",
+                    status=status.HTTP_200_OK,
+                )
+            return HttpResponse(
+                JSONRenderer().render(serialize.errors),
+                content_type="application/json",
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        except Exception as e:
+            return HttpResponse(
+                JSONRenderer().render({"Error": str(e)}),
+                content_type="application/json",
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+
+class LicenseMasterCRUD(_ProductCategoryStyleCRUDView):
+    model_cls = LicenseMaster
+    serializer_cls = LicenseMasterSerializer
+    code_fields = ("License_Id", "License_Key")
+    entity_label = "LicenseMaster"
+    select_related_fields = ("Customer_Id", "Product_Id", "Plan_Id", "ProductEdition_id", "Subscription_Id")
+    prefetch_related_fields = ("entitlements",)
+
+
+class LicenseMasterListwithPagination(ListAPIView):
+    queryset = LicenseMaster.objects.all()
+    serializer_class = LicenseMasterSerializer
+
+    def get_queryset(self):
+        try:
+            qs = (
+                LicenseMaster.objects.filter(Q(Is_Deleted=False))
+                .select_related("Customer_Id", "Product_Id", "Plan_Id", "ProductEdition_id", "Subscription_Id")
+                .prefetch_related("entitlements")
+                .order_by("-id")
+            )
+            return _apply_license_scope(qs, self.request.query_params)
+        except Exception as e:
+            raise Exception(f"Error while fetching LicenseMaster: {str(e)}")
+
+
+class LicenseMasterSearch(ListAPIView):
+    queryset = LicenseMaster.objects.all()
+    serializer_class = LicenseMasterSerializer
+
+    def get_queryset(self):
+        try:
+            qs = (
+                LicenseMaster.objects.filter(Is_Deleted=False)
+                .select_related("Customer_Id", "Product_Id", "Plan_Id", "ProductEdition_id", "Subscription_Id")
+                .prefetch_related("entitlements")
+                .order_by("-id")
+            )
+            return _apply_license_scope(qs, self.request.GET)
+        except Exception as e:
+            raise Exception(f"Error while searching LicenseMaster: {str(e)}")
+
+
+class LicenseMasterlistwithoutpaginaton(APIView):
+    def get(self, request, *args, **kwargs):
+        try:
+            qs = (
+                LicenseMaster.objects.filter(Is_Deleted=False)
+                .select_related("Customer_Id", "Product_Id", "Plan_Id", "ProductEdition_id", "Subscription_Id")
+                .prefetch_related("entitlements")
+                .order_by("-id")
+            )
+            qs = _apply_license_scope(qs, request.query_params)
+            serialize = LicenseMasterSerializer(qs, many=True)
+            return HttpResponse(JSONRenderer().render(serialize.data), content_type="application/json", status=status.HTTP_200_OK)
+        except Exception as e:
+            return HttpResponse(JSONRenderer().render({"Error": str(e)}), content_type="application/json", status=status.HTTP_400_BAD_REQUEST)
+
+
+class LicenseMasterFilter(ListAPIView):
+    queryset = LicenseMaster.objects.all()
+    serializer_class = LicenseMasterSerializer
+
+    def post(self, request, *args, **kwargs):
+        try:
+            data = request.data or {}
+            qs = (
+                LicenseMaster.objects.filter(Is_Deleted=False)
+                .select_related("Customer_Id", "Product_Id", "Plan_Id", "ProductEdition_id", "Subscription_Id")
+                .prefetch_related("entitlements")
+                .order_by("-id")
+            )
+            qs = _apply_license_scope(qs, data)
+            return _paginate_queryset(qs, LicenseMasterSerializer, page=data.get("page", 1), page_size=data.get("page_size"))
+        except Exception as e:
+            return HttpResponse(JSONRenderer().render({"Error": str(e)}), content_type="application/json", status=status.HTTP_400_BAD_REQUEST)
+
+
+class LicenseMasterKPIAPI(APIView):
+    """Returns KPI cards & breakdowns for License & Entitlement Management."""
+
+    def _build_kpi_response(self, params):
+        today = timezone.localdate()
+        expiring_cutoff = today + timedelta(days=30)
+
+        qs = _apply_license_scope(LicenseMaster.objects.filter(Is_Deleted=False), params)
+
+        total_licenses = qs.count()
+        suspended_q = Q(Status__icontains="Suspended")
+        revoked_q = Q(Status__icontains="Revoked")
+        expired_q = Q(Status__icontains="Expired")
+        suspended_licenses = qs.filter(suspended_q).count()
+        revoked_licenses = qs.filter(revoked_q).count()
+        suspended_revoked = qs.filter(suspended_q | revoked_q).count()
+        expired_licenses = qs.filter(expired_q).count()
+        active_licenses = qs.filter(Q(Status__icontains="Active") | Q(Status__icontains="Expiring")).count()
+        expiring_30_days = (
+            qs.filter(
+                Q(Status__icontains="Expiring")
+                | (Q(Valid_To__gte=today, Valid_To__lte=expiring_cutoff) & ~suspended_q & ~revoked_q)
+            )
+            .distinct()
+            .count()
+        )
+
+        seat_agg = qs.aggregate(
+            entitled=Sum("Entitled_Users"),
+            assigned=Sum("Assigned_Users"),
+        )
+        total_entitled_users = int(seat_agg.get("entitled") or 0)
+        total_assigned_users = int(seat_agg.get("assigned") or 0)
+        seat_utilization_pct = (
+            round((total_assigned_users / total_entitled_users) * 100, 1)
+            if total_entitled_users > 0
+            else 0.0
+        )
+
+        total_entitlements = LicenseEntitlement.objects.filter(Is_Deleted=False, License_Id__in=qs).count()
+        enabled_entitlements = LicenseEntitlement.objects.filter(
+            Is_Deleted=False, License_Id__in=qs, Status__icontains="Enabled"
+        ).count()
+        total_assignments = LicenseAssignment.objects.filter(Is_Deleted=False, License_Id__in=qs).count()
+        total_renewals = LicenseRenewal.objects.filter(Is_Deleted=False, License_Id__in=qs).count()
+
+        status_breakdown = {
+            (row["Status"] or "Unknown"): row["count"]
+            for row in qs.values("Status").annotate(count=Count("id"))
+        }
+        product_breakdown = [
+            {
+                "product_id": row["Product_Id_id"],
+                "product_name": row["Product_Id__Product_Name"] or row["Product_Name"] or "Unassigned",
+                "count": row["count"],
+            }
+            for row in qs.values("Product_Id_id", "Product_Id__Product_Name", "Product_Name").annotate(count=Count("id")).order_by("-count")
+        ]
+        license_type_breakdown = {
+            (row["License_Type"] or "Subscription"): row["count"]
+            for row in qs.values("License_Type").annotate(count=Count("id"))
+        }
+
+        payload = {
+            "status": True,
+            "total_licenses": total_licenses,
+            "active_licenses": active_licenses,
+            "expiring_30_days": expiring_30_days,
+            "suspended_revoked": suspended_revoked,
+            "suspended_licenses": suspended_licenses,
+            "revoked_licenses": revoked_licenses,
+            "expired_licenses": expired_licenses,
+            "total_entitled_users": total_entitled_users,
+            "total_assigned_users": total_assigned_users,
+            "seat_utilization_pct": seat_utilization_pct,
+            "total_entitlements": total_entitlements,
+            "enabled_entitlements": enabled_entitlements,
+            "total_assignments": total_assignments,
+            "total_renewals": total_renewals,
+            "status_breakdown": status_breakdown,
+            "product_breakdown": product_breakdown,
+            "license_type_breakdown": license_type_breakdown,
+            "cards": [
+                {"key": "total_licenses", "label": "Total Licenses", "value": total_licenses},
+                {"key": "active_licenses", "label": "Active Licenses", "value": active_licenses},
+                {"key": "expiring_30_days", "label": "Expiring (30 Days)", "value": expiring_30_days},
+                {"key": "suspended_revoked", "label": "Suspended / Revoked", "value": suspended_revoked},
+            ],
+        }
+        return HttpResponse(JSONRenderer().render(payload), content_type="application/json", status=status.HTTP_200_OK)
+
+    def get(self, request, *args, **kwargs):
+        try:
+            return self._build_kpi_response(request.query_params)
+        except Exception as e:
+            return HttpResponse(JSONRenderer().render({"Error": str(e)}), content_type="application/json", status=status.HTTP_400_BAD_REQUEST)
+
+    def post(self, request, *args, **kwargs):
+        try:
+            return self._build_kpi_response(request.data or {})
+        except Exception as e:
+            return HttpResponse(JSONRenderer().render({"Error": str(e)}), content_type="application/json", status=status.HTTP_400_BAD_REQUEST)
+
+
+def _filter_child_license_qs(model_cls, params, search_fields, select_related_fields=()):
+    qs = model_cls.objects.filter(Is_Deleted=False)
+    if select_related_fields:
+        qs = qs.select_related(*select_related_fields)
+
+    lic_val = params.get("License_Id") or params.get("license_id") or params.get("License_Key")
+    if lic_val:
+        txt = str(lic_val).strip()
+        if txt.isdigit():
+            qs = qs.filter(License_Id_id=int(txt))
+        else:
+            qs = qs.filter(Q(License_Id__License_Id__icontains=txt) | Q(License_Id__License_Key__icontains=txt))
+
+    status_val = params.get("Status") or params.get("status")
+    if status_val and str(status_val).strip().lower() != "all":
+        qs = qs.filter(Status__icontains=str(status_val).strip())
+
+    is_active = _parse_bool_flag(params.get("Is_Active"))
+    if is_active is not None:
+        qs = qs.filter(Is_Active=is_active)
+
+    search = params.get("search")
+    if search:
+        term = str(search).strip()
+        q = Q()
+        for field_name in search_fields:
+            q |= Q(**{f"{field_name}__icontains": term})
+        qs = qs.filter(q)
+
+    return qs.order_by("-id")
+
+
+class LicenseEntitlementCRUD(_ProductCategoryStyleCRUDView):
+    model_cls = LicenseEntitlement
+    serializer_cls = LicenseEntitlementSerializer
+    code_fields = ("Entitlement_Id",)
+    entity_label = "LicenseEntitlement"
+    select_related_fields = ("License_Id", "Feature_Id", "Addon_Id", "Module_Id")
+
+
+class LicenseEntitlementListwithPagination(ListAPIView):
+    queryset = LicenseEntitlement.objects.all()
+    serializer_class = LicenseEntitlementSerializer
+
+    def get_queryset(self):
+        return _filter_child_license_qs(
+            LicenseEntitlement,
+            self.request.query_params,
+            ("Entitlement_Id", "Entitlement_Name", "Entitlement_Type", "Status", "License_Id__License_Key"),
+            ("License_Id", "Feature_Id", "Addon_Id", "Module_Id"),
+        )
+
+
+class LicenseEntitlementSearch(ListAPIView):
+    queryset = LicenseEntitlement.objects.all()
+    serializer_class = LicenseEntitlementSerializer
+
+    def get_queryset(self):
+        return _filter_child_license_qs(
+            LicenseEntitlement,
+            self.request.GET,
+            ("Entitlement_Id", "Entitlement_Name", "Entitlement_Type", "Qty_Limit", "Status", "License_Id__License_Key"),
+            ("License_Id", "Feature_Id", "Addon_Id", "Module_Id"),
+        )
+
+
+class LicenseEntitlementlistwithoutpaginaton(APIView):
+    def get(self, request, *args, **kwargs):
+        try:
+            qs = _filter_child_license_qs(
+                LicenseEntitlement,
+                request.query_params,
+                ("Entitlement_Id", "Entitlement_Name", "Entitlement_Type", "Status", "License_Id__License_Key"),
+                ("License_Id", "Feature_Id", "Addon_Id", "Module_Id"),
+            )
+            return HttpResponse(
+                JSONRenderer().render(LicenseEntitlementSerializer(qs, many=True).data),
+                content_type="application/json",
+                status=status.HTTP_200_OK,
+            )
+        except Exception as e:
+            return HttpResponse(JSONRenderer().render({"Error": str(e)}), content_type="application/json", status=status.HTTP_400_BAD_REQUEST)
+
+
+class LicenseEntitlementFilter(ListAPIView):
+    queryset = LicenseEntitlement.objects.all()
+    serializer_class = LicenseEntitlementSerializer
+
+    def post(self, request, *args, **kwargs):
+        try:
+            data = request.data or {}
+            qs = _filter_child_license_qs(
+                LicenseEntitlement,
+                data,
+                ("Entitlement_Id", "Entitlement_Name", "Entitlement_Type", "Qty_Limit", "Status", "License_Id__License_Key"),
+                ("License_Id", "Feature_Id", "Addon_Id", "Module_Id"),
+            )
+            if data.get("Entitlement_Type"):
+                qs = qs.filter(Entitlement_Type__icontains=str(data.get("Entitlement_Type")).strip())
+            if data.get("Entitlement_Name"):
+                qs = qs.filter(Entitlement_Name__icontains=str(data.get("Entitlement_Name")).strip())
+            return _paginate_queryset(qs, LicenseEntitlementSerializer, page=data.get("page", 1), page_size=data.get("page_size"))
+        except Exception as e:
+            return HttpResponse(JSONRenderer().render({"Error": str(e)}), content_type="application/json", status=status.HTTP_400_BAD_REQUEST)
+
+
+class LicenseEntitlementKPIAPI(APIView):
+    def get(self, request, *args, **kwargs):
+        try:
+            qs = _filter_child_license_qs(
+                LicenseEntitlement,
+                request.query_params,
+                ("Entitlement_Id", "Entitlement_Name", "Entitlement_Type", "Status", "License_Id__License_Key"),
+            )
+            payload = {
+                "status": True,
+                "total_entitlements": qs.count(),
+                "enabled_entitlements": qs.filter(Status__icontains="Enabled").count(),
+                "disabled_entitlements": qs.filter(Q(Status__icontains="Disabled") | Q(Status__icontains="Suspended")).count(),
+                "type_breakdown": {
+                    (row["Entitlement_Type"] or "Feature"): row["count"]
+                    for row in qs.values("Entitlement_Type").annotate(count=Count("id"))
+                },
+            }
+            return HttpResponse(JSONRenderer().render(payload), content_type="application/json", status=status.HTTP_200_OK)
+        except Exception as e:
+            return HttpResponse(JSONRenderer().render({"Error": str(e)}), content_type="application/json", status=status.HTTP_400_BAD_REQUEST)
+
+
+class LicenseAssignmentCRUD(_ProductCategoryStyleCRUDView):
+    model_cls = LicenseAssignment
+    serializer_cls = LicenseAssignmentSerializer
+    code_fields = ("Assignment_Id",)
+    entity_label = "LicenseAssignment"
+    select_related_fields = ("License_Id", "Customer_Id", "Assigned_User_Id")
+
+    def _after_save(self, instance):
+        _sync_license_assigned_users(getattr(instance, "License_Id", None))
+
+
+class LicenseAssignmentListwithPagination(ListAPIView):
+    queryset = LicenseAssignment.objects.all()
+    serializer_class = LicenseAssignmentSerializer
+
+    def get_queryset(self):
+        return _filter_child_license_qs(
+            LicenseAssignment,
+            self.request.query_params,
+            ("Assignment_Id", "Assignee_Name", "Assignee_Email", "Role_Name", "Status", "License_Id__License_Key"),
+            ("License_Id", "Customer_Id", "Assigned_User_Id"),
+        )
+
+
+class LicenseAssignmentSearch(ListAPIView):
+    queryset = LicenseAssignment.objects.all()
+    serializer_class = LicenseAssignmentSerializer
+
+    def get_queryset(self):
+        return _filter_child_license_qs(
+            LicenseAssignment,
+            self.request.GET,
+            ("Assignment_Id", "Assignee_Name", "Assignee_Email", "Role_Name", "Status", "License_Id__License_Key"),
+            ("License_Id", "Customer_Id", "Assigned_User_Id"),
+        )
+
+
+class LicenseAssignmentlistwithoutpaginaton(APIView):
+    def get(self, request, *args, **kwargs):
+        try:
+            qs = _filter_child_license_qs(
+                LicenseAssignment,
+                request.query_params,
+                ("Assignment_Id", "Assignee_Name", "Assignee_Email", "Role_Name", "Status", "License_Id__License_Key"),
+                ("License_Id", "Customer_Id", "Assigned_User_Id"),
+            )
+            return HttpResponse(
+                JSONRenderer().render(LicenseAssignmentSerializer(qs, many=True).data),
+                content_type="application/json",
+                status=status.HTTP_200_OK,
+            )
+        except Exception as e:
+            return HttpResponse(JSONRenderer().render({"Error": str(e)}), content_type="application/json", status=status.HTTP_400_BAD_REQUEST)
+
+
+class LicenseAssignmentFilter(ListAPIView):
+    queryset = LicenseAssignment.objects.all()
+    serializer_class = LicenseAssignmentSerializer
+
+    def post(self, request, *args, **kwargs):
+        try:
+            data = request.data or {}
+            qs = _filter_child_license_qs(
+                LicenseAssignment,
+                data,
+                ("Assignment_Id", "Assignee_Name", "Assignee_Email", "Role_Name", "Status", "License_Id__License_Key"),
+                ("License_Id", "Customer_Id", "Assigned_User_Id"),
+            )
+            return _paginate_queryset(qs, LicenseAssignmentSerializer, page=data.get("page", 1), page_size=data.get("page_size"))
+        except Exception as e:
+            return HttpResponse(JSONRenderer().render({"Error": str(e)}), content_type="application/json", status=status.HTTP_400_BAD_REQUEST)
+
+
+class LicenseRenewalCRUD(_ProductCategoryStyleCRUDView):
+    model_cls = LicenseRenewal
+    serializer_cls = LicenseRenewalSerializer
+    code_fields = ("Renewal_Id",)
+    entity_label = "LicenseRenewal"
+    select_related_fields = ("License_Id",)
+
+    def _after_save(self, instance):
+        lic = getattr(instance, "License_Id", None)
+        if lic and not instance.Is_Deleted and instance.New_Valid_To:
+            lic.Valid_To = instance.New_Valid_To
+            if (lic.Status or "").lower() in ("expired", "expiring"):
+                lic.Status = "Active"
+                lic.Is_Active = True
+            lic.save()
+
+
+class LicenseRenewalListwithPagination(ListAPIView):
+    queryset = LicenseRenewal.objects.all()
+    serializer_class = LicenseRenewalSerializer
+
+    def get_queryset(self):
+        return _filter_child_license_qs(
+            LicenseRenewal,
+            self.request.query_params,
+            ("Renewal_Id", "Renewal_Type", "Renewal_Status", "Notes", "License_Id__License_Key"),
+            ("License_Id",),
+        )
+
+
+class LicenseRenewalSearch(ListAPIView):
+    queryset = LicenseRenewal.objects.all()
+    serializer_class = LicenseRenewalSerializer
+
+    def get_queryset(self):
+        return _filter_child_license_qs(
+            LicenseRenewal,
+            self.request.GET,
+            ("Renewal_Id", "Renewal_Type", "Renewal_Status", "Notes", "License_Id__License_Key"),
+            ("License_Id",),
+        )
+
+
+class LicenseRenewallistwithoutpaginaton(APIView):
+    def get(self, request, *args, **kwargs):
+        try:
+            qs = _filter_child_license_qs(
+                LicenseRenewal,
+                request.query_params,
+                ("Renewal_Id", "Renewal_Type", "Renewal_Status", "Notes", "License_Id__License_Key"),
+                ("License_Id",),
+            )
+            return HttpResponse(
+                JSONRenderer().render(LicenseRenewalSerializer(qs, many=True).data),
+                content_type="application/json",
+                status=status.HTTP_200_OK,
+            )
+        except Exception as e:
+            return HttpResponse(JSONRenderer().render({"Error": str(e)}), content_type="application/json", status=status.HTTP_400_BAD_REQUEST)
+
+
+class LicenseRenewalFilter(ListAPIView):
+    queryset = LicenseRenewal.objects.all()
+    serializer_class = LicenseRenewalSerializer
+
+    def post(self, request, *args, **kwargs):
+        try:
+            data = request.data or {}
+            qs = _filter_child_license_qs(
+                LicenseRenewal,
+                data,
+                ("Renewal_Id", "Renewal_Type", "Renewal_Status", "Notes", "License_Id__License_Key"),
+                ("License_Id",),
+            )
+            return _paginate_queryset(qs, LicenseRenewalSerializer, page=data.get("page", 1), page_size=data.get("page_size"))
+        except Exception as e:
+            return HttpResponse(JSONRenderer().render({"Error": str(e)}), content_type="application/json", status=status.HTTP_400_BAD_REQUEST)
+
+
+class LicenseActionAPI(APIView):
+    """Handles Suspend, Revoke, Activate, Extend, and Edit Entitlements actions on a License."""
+
+    @transaction.atomic
+    def post(self, request, *args, **kwargs):
+        try:
+            data = request.data or {}
+            action = str(data.get("action") or "").strip().lower()
+            if not action:
+                raise Exception("action is required (suspend, revoke, activate, extend, edit_entitlements)")
+
+            lic_qs = LicenseMaster.objects.filter(Is_Deleted=False)
+            if data.get("id"):
+                lic = lic_qs.get(id=data.get("id"))
+            elif data.get("License_Id"):
+                lic = lic_qs.filter(License_Id__icontains=str(data.get("License_Id")).strip()).order_by("id").first()
+            elif data.get("License_Key"):
+                lic = lic_qs.filter(License_Key__icontains=str(data.get("License_Key")).strip()).order_by("id").first()
+            else:
+                raise Exception("id, License_Id, or License_Key is required")
+
+            if lic is None:
+                raise LicenseMaster.DoesNotExist("License not found")
+
+            notes = data.get("notes") or data.get("Notes")
+            if notes is not None:
+                lic.Notes = notes
+
+            if action == "suspend":
+                lic.Status = "Suspended"
+                lic.Is_Active = False
+                lic.save()
+            elif action == "revoke":
+                lic.Status = "Revoked"
+                lic.Is_Active = False
+                lic.save()
+            elif action == "activate":
+                lic.Status = "Active"
+                lic.Is_Active = True
+                lic.save()
+            elif action == "extend":
+                prev_to = lic.Valid_To or timezone.localdate()
+                new_to_raw = data.get("new_valid_to") or data.get("Valid_To")
+                if new_to_raw:
+                    new_to = DT.date.fromisoformat(str(new_to_raw).split("T")[0])
+                else:
+                    extend_days = int(data.get("extend_days") or 365)
+                    new_to = prev_to + timedelta(days=extend_days)
+                lic.Valid_To = new_to
+                lic.Status = "Active"
+                lic.Is_Active = True
+                lic.save()
+
+                LicenseRenewal.objects.create(
+                    Organization_Id=lic.Organization_Id,
+                    License_Id=lic,
+                    Previous_Valid_To=prev_to,
+                    New_Valid_To=new_to,
+                    Extended_Days=max(0, (new_to - prev_to).days),
+                    Renewal_Type=data.get("renewal_type") or "Manual Extension",
+                    Renewal_Amount=Decimal(str(data.get("renewal_amount") or 0)),
+                    Renewal_Status="Completed",
+                    Notes=notes or f"Extended validity to {new_to.isoformat()}",
+                    Created_By=lic.Updated_By or lic.Created_By,
+                    Updated_By=lic.Updated_By or lic.Created_By,
+                )
+            elif action == "edit_entitlements":
+                items = data.get("entitlements")
+                if not isinstance(items, list):
+                    raise Exception("entitlements list is required for edit_entitlements")
+                keep_ids = []
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
+                    item_payload = dict(item)
+                    item_payload["License_Id"] = lic.id
+                    ent_pk = item_payload.get("id")
+                    if ent_pk:
+                        ent_obj = LicenseEntitlement.objects.get(id=ent_pk, License_Id=lic, Is_Deleted=False)
+                        ser = LicenseEntitlementSerializer(instance=ent_obj, data=item_payload, partial=True)
+                    else:
+                        ser = LicenseEntitlementSerializer(data=item_payload)
+                    if not ser.is_valid():
+                        return HttpResponse(
+                            JSONRenderer().render(ser.errors),
+                            content_type="application/json",
+                            status=status.HTTP_400_BAD_REQUEST,
+                        )
+                    saved_ent = ser.save()
+                    keep_ids.append(saved_ent.id)
+                if data.get("replace_missing"):
+                    LicenseEntitlement.objects.filter(License_Id=lic, Is_Deleted=False).exclude(id__in=keep_ids).update(
+                        Is_Deleted=True, Is_Active=False
+                    )
+            else:
+                raise Exception(f"Unsupported action: {action}")
+
+            lic.refresh_from_db()
+            return HttpResponse(
+                JSONRenderer().render({"status": True, "action": action, "data": LicenseMasterSerializer(lic).data}),
+                content_type="application/json",
+                status=status.HTTP_200_OK,
+            )
+        except Exception as e:
+            return HttpResponse(
+                JSONRenderer().render({"Error": str(e)}),
+                content_type="application/json",
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+
+class LicenseUsageComplianceAPI(APIView):
+    """Powers the Usage & Compliance tab across licenses and entitlements."""
+
+    def _build_rows(self, params):
+        qs = (
+            LicenseMaster.objects.filter(Is_Deleted=False)
+            .select_related("Customer_Id", "Product_Id", "Plan_Id", "ProductEdition_id")
+            .prefetch_related("entitlements")
+            .order_by("-id")
+        )
+        qs = _apply_license_scope(qs, params)
+        today = timezone.localdate()
+
+        rows = []
+        for lic in qs:
+            entitled = int(lic.Entitled_Users or 0)
+            assigned = int(lic.Assigned_Users or 0)
+            seat_pct = round((assigned / entitled) * 100, 1) if entitled > 0 else 0.0
+            active_ents = [e for e in lic.entitlements.all() if not e.Is_Deleted]
+            limit_breaches = sum(
+                1
+                for e in active_ents
+                if e.Limit_Value is not None and int(e.Used_Value or 0) > int(e.Limit_Value)
+            )
+            days_left = (lic.Valid_To - today).days if lic.Valid_To else None
+            lic_status = (lic.Status or "Active").lower()
+            if lic_status in ("suspended", "revoked", "expired") or (days_left is not None and days_left < 0):
+                compliance = "Non-Compliant"
+            elif (entitled > 0 and assigned > entitled) or limit_breaches > 0:
+                compliance = "Over Limit"
+            elif seat_pct >= 85 or (days_left is not None and days_left <= 30):
+                compliance = "Attention Required"
+            else:
+                compliance = "Compliant"
+
+            rows.append(
+                {
+                    "id": lic.id,
+                    "License_Id": lic.License_Id,
+                    "License_Key": lic.License_Key,
+                    "Customer_Name": lic.Customer_Name or (lic.Customer_Id.Organization_Name if lic.Customer_Id else ""),
+                    "Product_Name": lic.Product_Name or (lic.Product_Id.Product_Name if lic.Product_Id else ""),
+                    "Plan_Edition_Name": lic.Plan_Edition_Name or "",
+                    "Entitled_Users": entitled,
+                    "Assigned_Users": assigned,
+                    "Seat_Utilization_Pct": seat_pct,
+                    "Entitlements_Count": len(active_ents),
+                    "Limit_Breaches": limit_breaches,
+                    "Valid_To": lic.Valid_To.isoformat() if lic.Valid_To else None,
+                    "Days_To_Expiry": days_left,
+                    "Last_Activity": lic.Last_Activity.isoformat() if lic.Last_Activity else None,
+                    "License_Status": lic.Status,
+                    "Compliance_Status": compliance,
+                }
+            )
+        return rows
+
+    def get(self, request, *args, **kwargs):
+        try:
+            rows = self._build_rows(request.query_params)
+            return HttpResponse(
+                JSONRenderer().render({"status": True, "count": len(rows), "results": rows}),
+                content_type="application/json",
+                status=status.HTTP_200_OK,
+            )
+        except Exception as e:
+            return HttpResponse(JSONRenderer().render({"Error": str(e)}), content_type="application/json", status=status.HTTP_400_BAD_REQUEST)
+
+    def post(self, request, *args, **kwargs):
+        try:
+            data = request.data or {}
+            rows = self._build_rows(data)
+            page_num = max(1, int(data.get("page") or 1))
+            size = int(data.get("page_size") or REST_FRAMEWORK.get("PAGE_SIZE", 10) or 10)
+            start = (page_num - 1) * size
+            return HttpResponse(
+                JSONRenderer().render({"status": True, "count": len(rows), "page": page_num, "results": rows[start:start + size]}),
+                content_type="application/json",
+                status=status.HTTP_200_OK,
+            )
+        except Exception as e:
+            return HttpResponse(JSONRenderer().render({"Error": str(e)}), content_type="application/json", status=status.HTTP_400_BAD_REQUEST)
+
+
+class LicenseLookupsAPI(APIView):
+    """Returns dropdown options for License & Entitlement filters and Issue License modal."""
+
+    def get(self, request, *args, **kwargs):
+        try:
+            products = list(
+                ProductMaster.objects.filter(Is_Deleted=False, Is_Active=True)
+                .values("id", "Product_Code", "Product_Name")
+                .order_by("id")
+            )
+            plans = list(
+                Plan.objects.filter(Is_Deleted=False, Is_Active_Flg=True)
+                .values("id", "Plan_Id", "Plan_Name", "Product_id", "ProductEdition_id_id", "ProductEdition_Name")
+                .order_by("id")
+            )
+            editions = list(
+                ProductEdition.objects.filter(Is_Deleted=False, Is_Active=True)
+                .values("id", "Edition_Id", "Edition_Code", "Edition_Name", "Product_Id_id")
+                .order_by("id")
+            )
+            customers = list(
+                Account.objects.filter(Is_Deleted=False)
+                .values("id", "Account_Id", "Organization_Name", "Contact_Name")
+                .order_by("-id")[:200]
+            )
+            features = list(
+                ProductFeature.objects.filter(Is_Deleted=False, Is_Active=True)
+                .values("id", "Feature_Id", "Feature_Name", "Product_Id_id")
+                .order_by("id")
+            )
+            addons = list(
+                AddonMaster.objects.filter(Is_Deleted=False, Is_Active=True)
+                .values("id", "Addon_Code", "Addon_Name")
+                .order_by("id")
+            )
+            return HttpResponse(
+                JSONRenderer().render(
+                    {
+                        "status": True,
+                        "products": products,
+                        "plans": plans,
+                        "editions": editions,
+                        "customers": customers,
+                        "features": features,
+                        "addons": addons,
+                        "statuses": ["Active", "Expiring", "Suspended", "Revoked", "Expired"],
+                        "license_types": ["Subscription", "Trial", "Enterprise", "Partner", "Add-on", "Perpetual"],
+                    }
+                ),
+                content_type="application/json",
+                status=status.HTTP_200_OK,
+            )
+        except Exception as e:
+            return HttpResponse(JSONRenderer().render({"Error": str(e)}), content_type="application/json", status=status.HTTP_400_BAD_REQUEST)
+
+
+class LicenseMasterExportAPI(APIView):
+    """Exports filtered licenses to CSV matching table columns."""
+
+    def _export_csv(self, params):
+        qs = (
+            LicenseMaster.objects.filter(Is_Deleted=False)
+            .select_related("Customer_Id", "Product_Id", "Plan_Id", "ProductEdition_id")
+            .order_by("-id")
+        )
+        qs = _apply_license_scope(qs, params)
+        response = HttpResponse(content_type="text/csv")
+        response["Content-Disposition"] = 'attachment; filename="licenses_export.csv"'
+        writer = csv.writer(response)
+        writer.writerow([
+            "License ID", "License Key", "Customer / Tenant", "Product",
+            "Plan / Edition", "License Type", "Entitled Users", "Assigned Users",
+            "Valid From", "Valid To", "Status",
+        ])
+        for lic in qs:
+            writer.writerow([
+                lic.License_Id,
+                lic.License_Key,
+                lic.Customer_Name or (lic.Customer_Id.Organization_Name if lic.Customer_Id else ""),
+                lic.Product_Name or (lic.Product_Id.Product_Name if lic.Product_Id else ""),
+                lic.Plan_Edition_Name or "",
+                lic.License_Type or "",
+                lic.Entitled_Users or 0,
+                lic.Assigned_Users or 0,
+                lic.Valid_From.isoformat() if lic.Valid_From else "",
+                lic.Valid_To.isoformat() if lic.Valid_To else "",
+                lic.Status or "",
+            ])
+        return response
+
+    def get(self, request, *args, **kwargs):
+        return self._export_csv(request.query_params)
+
+    def post(self, request, *args, **kwargs):
+        return self._export_csv(request.data or {})
+
+
+# ========================================== TrialConfiguration (Single Table) =========================================== #
+
+def _apply_trial_configuration_scope(qs, params):
+    """Apply ProductCategory-style ORM filtering (all strings via icontains) on TrialConfiguration."""
+    if not params:
+        return qs
+
+    if params.get("Trial_Id"):
+        qs = qs.filter(Trial_Id__icontains=str(params.get("Trial_Id")).strip())
+
+    if params.get("Trial_Code"):
+        qs = qs.filter(Trial_Code__icontains=str(params.get("Trial_Code")).strip())
+
+    if params.get("Trial_Plan_Name"):
+        qs = qs.filter(Trial_Plan_Name__icontains=str(params.get("Trial_Plan_Name")).strip())
+
+    product_val = params.get("Product_Id") or params.get("Product") or params.get("product_id")
+    if product_val and str(product_val).strip().lower() not in ("all", "all products"):
+        p_txt = str(product_val).strip()
+        if p_txt.isdigit():
+            qs = qs.filter(Product_Id_id=int(p_txt))
+        else:
+            qs = qs.filter(
+                Q(Product_Id__Product_Code__icontains=p_txt)
+                | Q(Product_Id__Product_Name__icontains=p_txt)
+            )
+
+    edition_val = params.get("Edition_Id") or params.get("Edition") or params.get("edition_id")
+    if edition_val and str(edition_val).strip().lower() not in ("all", "all editions"):
+        e_txt = str(edition_val).strip()
+        if e_txt.isdigit():
+            qs = qs.filter(Edition_Id_id=int(e_txt))
+        else:
+            qs = qs.filter(
+                Q(Edition_Id__Edition_Name__icontains=e_txt)
+                | Q(Edition_Id__Edition_Code__icontains=e_txt)
+                | Q(Edition_Id__Edition_Id__icontains=e_txt)
+            )
+
+    plan_val = params.get("Plan_Id") or params.get("Plan") or params.get("plan_id")
+    if plan_val and str(plan_val).strip().lower() not in ("all", "all plans"):
+        pl_txt = str(plan_val).strip()
+        if pl_txt.isdigit():
+            qs = qs.filter(Plan_Id_id=int(pl_txt))
+        else:
+            qs = qs.filter(Q(Plan_Id__Plan_Name__icontains=pl_txt) | Q(Plan_Id__Plan_Id__icontains=pl_txt))
+
+    cat_val = params.get("Category_Id") or params.get("Category")
+    if cat_val and str(cat_val).strip().lower() != "all":
+        c_txt = str(cat_val).strip()
+        if c_txt.isdigit():
+            qs = qs.filter(Category_Id_id=int(c_txt))
+        else:
+            qs = qs.filter(
+                Q(Category_Id__Category_Name__icontains=c_txt)
+                | Q(Category_Id__Category_Code__icontains=c_txt)
+            )
+
+    status_val = params.get("Status") or params.get("status")
+    if status_val and str(status_val).strip().lower() not in ("all", "all status", "all statuses"):
+        qs = qs.filter(Status__icontains=str(status_val).strip())
+
+    if params.get("Feature_Scope"):
+        qs = qs.filter(Feature_Scope__icontains=str(params.get("Feature_Scope")).strip())
+
+    if params.get("Trial_Duration_Days") and str(params.get("Trial_Duration_Days")).isdigit():
+        qs = qs.filter(Trial_Duration_Days=int(params.get("Trial_Duration_Days")))
+
+    is_active = _parse_bool_flag(params.get("Is_Active"))
+    if is_active is not None:
+        qs = qs.filter(Is_Active=is_active)
+
+    if params.get("Organization_Id") and str(params.get("Organization_Id")).isdigit():
+        qs = qs.filter(Organization_Id_id=int(params.get("Organization_Id")))
+
+    if params.get("Created_By") and str(params.get("Created_By")).isdigit():
+        qs = qs.filter(Created_By_id=int(params.get("Created_By")))
+
+    from_date = params.get("fromdate") or params.get("from_date")
+    to_date = params.get("todate") or params.get("to_date")
+    if from_date and to_date:
+        qs = qs.filter(Created_Date__date__range=[from_date, to_date])
+
+    search = params.get("search")
+    if search:
+        term = str(search).strip()
+        qs = qs.filter(
+            Q(Trial_Id__icontains=term)
+            | Q(Trial_Code__icontains=term)
+            | Q(Trial_Plan_Name__icontains=term)
+            | Q(Features_Summary__icontains=term)
+            | Q(Feature_Scope__icontains=term)
+            | Q(Description__icontains=term)
+            | Q(Status__icontains=term)
+            | Q(Product_Id__Product_Name__icontains=term)
+            | Q(Product_Id__Product_Code__icontains=term)
+            | Q(Edition_Id__Edition_Name__icontains=term)
+            | Q(Plan_Id__Plan_Name__icontains=term)
+        )
+
+    return qs
+
+
+class TrialConfigurationCRUD(_ProductCategoryStyleCRUDView):
+    model_cls = TrialConfiguration
+    serializer_cls = TrialConfigurationSerializer
+    code_fields = ("Trial_Id", "Trial_Code")
+    entity_label = "TrialConfiguration"
+    select_related_fields = ("Product_Id", "Edition_Id", "Plan_Id", "Category_Id", "Default_Converted_Plan_Id")
+    prefetch_related_fields = ("Enabled_Features",)
+
+
+class TrialConfigurationListwithPagination(ListAPIView):
+    queryset = TrialConfiguration.objects.all()
+    serializer_class = TrialConfigurationSerializer
+
+    def get_queryset(self):
+        try:
+            qs = (
+                TrialConfiguration.objects.filter(Q(Is_Deleted=False))
+                .select_related("Product_Id", "Edition_Id", "Plan_Id", "Category_Id", "Default_Converted_Plan_Id")
+                .prefetch_related("Enabled_Features")
+                .order_by("-id")
+            )
+            return _apply_trial_configuration_scope(qs, self.request.query_params)
+        except Exception as e:
+            raise Exception(f"Error while fetching TrialConfiguration: {str(e)}")
+
+
+class TrialConfigurationSearch(ListAPIView):
+    queryset = TrialConfiguration.objects.all()
+    serializer_class = TrialConfigurationSerializer
+
+    def get_queryset(self):
+        try:
+            qs = (
+                TrialConfiguration.objects.filter(Is_Deleted=False)
+                .select_related("Product_Id", "Edition_Id", "Plan_Id", "Category_Id", "Default_Converted_Plan_Id")
+                .prefetch_related("Enabled_Features")
+                .order_by("-id")
+            )
+            return _apply_trial_configuration_scope(qs, self.request.GET)
+        except Exception as e:
+            raise Exception(f"Error while searching TrialConfiguration: {str(e)}")
+
+
+class TrialConfigurationlistwithoutpaginaton(APIView):
+    def get(self, request, *args, **kwargs):
+        try:
+            qs = (
+                TrialConfiguration.objects.filter(Is_Deleted=False)
+                .select_related("Product_Id", "Edition_Id", "Plan_Id", "Category_Id", "Default_Converted_Plan_Id")
+                .prefetch_related("Enabled_Features")
+                .order_by("-id")
+            )
+            qs = _apply_trial_configuration_scope(qs, request.query_params)
+            serialize = TrialConfigurationSerializer(qs, many=True)
+            return HttpResponse(JSONRenderer().render(serialize.data), content_type="application/json", status=status.HTTP_200_OK)
+        except Exception as e:
+            return HttpResponse(JSONRenderer().render({"Error": str(e)}), content_type="application/json", status=status.HTTP_400_BAD_REQUEST)
+
+
+class TrialConfigurationFilter(ListAPIView):
+    queryset = TrialConfiguration.objects.all()
+    serializer_class = TrialConfigurationSerializer
+
+    def post(self, request, *args, **kwargs):
+        try:
+            data = request.data or {}
+            qs = (
+                TrialConfiguration.objects.filter(Is_Deleted=False)
+                .select_related("Product_Id", "Edition_Id", "Plan_Id", "Category_Id", "Default_Converted_Plan_Id")
+                .prefetch_related("Enabled_Features")
+                .order_by("-id")
+            )
+            qs = _apply_trial_configuration_scope(qs, data)
+            return _paginate_queryset(qs, TrialConfigurationSerializer, page=data.get("page", 1), page_size=data.get("page_size"))
+        except Exception as e:
+            return HttpResponse(JSONRenderer().render({"Error": str(e)}), content_type="application/json", status=status.HTTP_400_BAD_REQUEST)
+
+
+class TrialConfigurationKPIAPI(APIView):
+    """Returns KPI cards & breakdowns for Trial Configuration from single TrialConfiguration table + Subscriptions."""
+
+    def _build_kpi_response(self, params):
+        from django.db.models import Avg
+
+        qs = _apply_trial_configuration_scope(
+            TrialConfiguration.objects.filter(Is_Deleted=False), params
+        )
+        total_trial_plans = qs.count()
+        active_trial_plans = qs.filter(Q(Status__icontains="Active") | Q(Is_Active=True)).count()
+        draft_trial_plans = qs.filter(Status__icontains="Draft").count()
+        inactive_trial_plans = qs.filter(Status__icontains="Inactive").count()
+
+        avg_dur = qs.aggregate(avg_days=Avg("Trial_Duration_Days")).get("avg_days")
+        average_trial_duration_days = round(float(avg_dur), 1) if avg_dur is not None else 0.0
+        avg_dur_int = int(round(average_trial_duration_days))
+
+        # Live trial subscription metrics (optionally scoped by Product filter)
+        sub_qs = Subscriptions.objects.filter(Is_Deleted=False)
+        product_val = params.get("Product_Id") or params.get("Product") or params.get("product_id")
+        if product_val and str(product_val).strip().lower() not in ("all", "all products"):
+            p_txt = str(product_val).strip()
+            if p_txt.isdigit():
+                sub_qs = sub_qs.filter(Product_Id_id=int(p_txt))
+            else:
+                sub_qs = sub_qs.filter(
+                    Q(Product_Id__Product_Code__icontains=p_txt)
+                    | Q(Product_Id__Product_Name__icontains=p_txt)
+                )
+
+        trial_subs = sub_qs.filter(Q(is_trial=True) | Q(status__icontains="trial"))
+        trials_in_progress = trial_subs.exclude(
+            Q(status__icontains="expired") | Q(status__icontains="cancelled")
+        ).count()
+
+        total_trials_count = trial_subs.count()
+        converted_trials = sub_qs.filter(
+            Q(previous_subscription__is_trial=True)
+            | Q(previous_subscription__status__icontains="trial")
+        ).filter(Q(status__icontains="active") | Q(is_trial=False)).count()
+
+        trial_conversions_pct = (
+            round((converted_trials / total_trials_count) * 100, 1)
+            if total_trials_count > 0
+            else 0.0
+        )
+
+        status_breakdown = {
+            (row["Status"] or "Draft"): row["count"]
+            for row in qs.values("Status").annotate(count=Count("id"))
+        }
+        product_breakdown = [
+            {
+                "product_id": row["Product_Id_id"],
+                "product_name": row["Product_Id__Product_Name"] or "Unassigned",
+                "count": row["count"],
+            }
+            for row in qs.values("Product_Id_id", "Product_Id__Product_Name").annotate(count=Count("id")).order_by("-count")
+        ]
+
+        payload = {
+            "status": True,
+            "total_trial_plans": total_trial_plans,
+            "active_trial_plans": active_trial_plans,
+            "draft_trial_plans": draft_trial_plans,
+            "inactive_trial_plans": inactive_trial_plans,
+            "trials_in_progress": trials_in_progress,
+            "total_trials_count": total_trials_count,
+            "converted_trials_count": converted_trials,
+            "trial_conversions_pct": trial_conversions_pct,
+            "trial_conversions_label": f"{int(round(trial_conversions_pct))}%",
+            "average_trial_duration_days": average_trial_duration_days,
+            "average_trial_duration_label": f"{avg_dur_int} Days",
+            "status_breakdown": status_breakdown,
+            "product_breakdown": product_breakdown,
+            "cards": [
+                {"key": "active_trial_plans", "label": "Active Trial Plans", "value": active_trial_plans},
+                {"key": "trials_in_progress", "label": "Trials in Progress", "value": trials_in_progress},
+                {"key": "trial_conversions_pct", "label": "Trial Conversions", "value": f"{int(round(trial_conversions_pct))}%"},
+                {"key": "average_trial_duration_days", "label": "Average Trial Duration", "value": f"{avg_dur_int} Days"},
+            ],
+        }
+        return HttpResponse(JSONRenderer().render(payload), content_type="application/json", status=status.HTTP_200_OK)
+
+    def get(self, request, *args, **kwargs):
+        try:
+            return self._build_kpi_response(request.query_params)
+        except Exception as e:
+            return HttpResponse(JSONRenderer().render({"Error": str(e)}), content_type="application/json", status=status.HTTP_400_BAD_REQUEST)
+
+    def post(self, request, *args, **kwargs):
+        try:
+            return self._build_kpi_response(request.data or {})
+        except Exception as e:
+            return HttpResponse(JSONRenderer().render({"Error": str(e)}), content_type="application/json", status=status.HTTP_400_BAD_REQUEST)
+
+
+
+
 
 
 

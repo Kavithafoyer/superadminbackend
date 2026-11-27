@@ -10,7 +10,7 @@ class Migration(migrations.Migration):
     initial = True
 
     dependencies = [
-        ('auth', '0002_initial'),
+        ('auth', '0012_alter_user_first_name_max_length'),
         ('authapp', '0001_initial'),
         ('partner', '0001_initial'),
     ]

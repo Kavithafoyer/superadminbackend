@@ -606,4 +606,46 @@ path('ProductEditionSearch/', ProductEditionSearch.as_view(), name='product-edit
 path('ProductEditionlistwithoutpaginaton/', ProductEditionlistwithoutpaginaton.as_view(), name='product-edition-list-without-pagination'),
 path('Planlistwithoutpaginaton/', Planlistwithoutpaginaton.as_view(), name='plan-list-without-pagination'),
 path('ProductEditionFilter/', ProductEditionFilter.as_view(), name='product-edition-filter'),
+
+# License & Entitlement Management (ProductCategory pattern + KPI + Actions)
+path('LicenseMasterCRUD/', LicenseMasterCRUD.as_view(), name='license-master-crud'),
+path('LicenseMasterListwithPagination/', LicenseMasterListwithPagination.as_view(), name='license-master-list-paginated'),
+path('LicenseMasterSearch/', LicenseMasterSearch.as_view(), name='license-master-search'),
+path('LicenseMasterlistwithoutpaginaton/', LicenseMasterlistwithoutpaginaton.as_view(), name='license-master-list-without-pagination'),
+path('LicenseMasterFilter/', LicenseMasterFilter.as_view(), name='license-master-filter'),
+path('LicenseMasterKPI/', LicenseMasterKPIAPI.as_view(), name='license-master-kpi'),
+path('LicenseAction/', LicenseActionAPI.as_view(), name='license-action'),
+path('LicenseUsageCompliance/', LicenseUsageComplianceAPI.as_view(), name='license-usage-compliance'),
+path('LicenseLookups/', LicenseLookupsAPI.as_view(), name='license-lookups'),
+path('LicenseMasterExport/', LicenseMasterExportAPI.as_view(), name='license-master-export'),
+
+# License Entitlements
+path('LicenseEntitlementCRUD/', LicenseEntitlementCRUD.as_view(), name='license-entitlement-crud'),
+path('LicenseEntitlementListwithPagination/', LicenseEntitlementListwithPagination.as_view(), name='license-entitlement-list-paginated'),
+path('LicenseEntitlementSearch/', LicenseEntitlementSearch.as_view(), name='license-entitlement-search'),
+path('LicenseEntitlementlistwithoutpaginaton/', LicenseEntitlementlistwithoutpaginaton.as_view(), name='license-entitlement-list-without-pagination'),
+path('LicenseEntitlementFilter/', LicenseEntitlementFilter.as_view(), name='license-entitlement-filter'),
+path('LicenseEntitlementKPI/', LicenseEntitlementKPIAPI.as_view(), name='license-entitlement-kpi'),
+
+# License Assignments
+path('LicenseAssignmentCRUD/', LicenseAssignmentCRUD.as_view(), name='license-assignment-crud'),
+path('LicenseAssignmentListwithPagination/', LicenseAssignmentListwithPagination.as_view(), name='license-assignment-list-paginated'),
+path('LicenseAssignmentSearch/', LicenseAssignmentSearch.as_view(), name='license-assignment-search'),
+path('LicenseAssignmentlistwithoutpaginaton/', LicenseAssignmentlistwithoutpaginaton.as_view(), name='license-assignment-list-without-pagination'),
+path('LicenseAssignmentFilter/', LicenseAssignmentFilter.as_view(), name='license-assignment-filter'),
+
+# License Renewals
+path('LicenseRenewalCRUD/', LicenseRenewalCRUD.as_view(), name='license-renewal-crud'),
+path('LicenseRenewalListwithPagination/', LicenseRenewalListwithPagination.as_view(), name='license-renewal-list-paginated'),
+path('LicenseRenewalSearch/', LicenseRenewalSearch.as_view(), name='license-renewal-search'),
+path('LicenseRenewallistwithoutpaginaton/', LicenseRenewallistwithoutpaginaton.as_view(), name='license-renewal-list-without-pagination'),
+path('LicenseRenewalFilter/', LicenseRenewalFilter.as_view(), name='license-renewal-filter'),
+
+# Trial Configuration (Single Table - ProductCategory pattern + KPI)
+path('TrialConfigurationCRUD/', TrialConfigurationCRUD.as_view(), name='trial-configuration-crud'),
+path('TrialConfigurationListwithPagination/', TrialConfigurationListwithPagination.as_view(), name='trial-configuration-list-paginated'),
+path('TrialConfigurationSearch/', TrialConfigurationSearch.as_view(), name='trial-configuration-search'),
+path('TrialConfigurationlistwithoutpaginaton/', TrialConfigurationlistwithoutpaginaton.as_view(), name='trial-configuration-list-without-pagination'),
+path('TrialConfigurationFilter/', TrialConfigurationFilter.as_view(), name='trial-configuration-filter'),
+path('TrialConfigurationKPI/', TrialConfigurationKPIAPI.as_view(), name='trial-configuration-kpi'),
 ]

@@ -2568,3 +2568,291 @@ class AuditHistory(models.Model):
             models.Index(fields=['Is_Deleted']),
         ]
 
+
+# ==========================================
+# License & Entitlement Management Models
+# ==========================================
+
+def _generate_prefixed_code(model_cls, field_name, prefix, width=9):
+    """Generate sequential prefixed code like LIC000000001."""
+    import re
+    last_obj = model_cls.objects.order_by('-id').first()
+    if not last_obj:
+        return f"{prefix}{1:0{width}d}"
+    raw_val = getattr(last_obj, field_name, None) or ''
+    digits = re.findall(r'\d+', str(raw_val))
+    next_num = (int(digits[-1]) + 1) if digits else (last_obj.id + 1)
+    return f"{prefix}{next_num:0{width}d}"
+
+
+def LicenseMaster_I():
+    return _generate_prefixed_code(LicenseMaster, 'License_Id', 'LIC', 9)
+
+
+def LicenseEntitlement_I():
+    return _generate_prefixed_code(LicenseEntitlement, 'Entitlement_Id', 'ENT', 9)
+
+
+def LicenseAssignment_I():
+    return _generate_prefixed_code(LicenseAssignment, 'Assignment_Id', 'LAS', 9)
+
+
+def LicenseRenewal_I():
+    return _generate_prefixed_code(LicenseRenewal, 'Renewal_Id', 'LRN', 9)
+
+
+def _generate_license_key(product_obj=None):
+    """Generate human-readable license key like PGT-CRM-100001."""
+    import re
+    prod_code = 'GEN'
+    if product_obj is not None:
+        raw_code = getattr(product_obj, 'Product_Code', None) or getattr(product_obj, 'Product_Name', None) or 'GEN'
+        cleaned = re.sub(r'[^A-Za-z0-9]', '', str(raw_code).upper())
+        if cleaned:
+            prod_code = cleaned[:4]
+    last_obj = LicenseMaster.objects.order_by('-id').first()
+    next_seq = 100001
+    if last_obj:
+        digits = re.findall(r'\d+', str(last_obj.License_Key or ''))
+        next_seq = (int(digits[-1]) + 1) if digits else (100000 + last_obj.id + 1)
+    return f"PGT-{prod_code}-{next_seq}"
+
+
+class LicenseMaster(models.Model):
+    License_Id = models.CharField(max_length=50, unique=True, default=LicenseMaster_I)
+    License_Key = models.CharField(max_length=100, unique=True, blank=True, null=True)
+    Organization_Id = models.ForeignKey(Userorganizationmaster, on_delete=models.CASCADE, blank=True, null=True)
+    Customer_Id = models.ForeignKey('Account', on_delete=models.CASCADE, blank=True, null=True, related_name='licenses')
+    Customer_Name = models.CharField(max_length=250, blank=True, null=True)
+    Product_Id = models.ForeignKey('ProductMaster', on_delete=models.CASCADE, blank=True, null=True, related_name='product_licenses')
+    Product_Name = models.CharField(max_length=250, blank=True, null=True)
+    Plan_Id = models.ForeignKey('Plan', on_delete=models.SET_NULL, blank=True, null=True, related_name='plan_licenses')
+    ProductEdition_id = models.ForeignKey('ProductEdition', on_delete=models.SET_NULL, blank=True, null=True, related_name='edition_licenses')
+    Plan_Edition_Name = models.CharField(max_length=150, blank=True, null=True)
+    Subscription_Id = models.ForeignKey('Subscriptions', on_delete=models.SET_NULL, blank=True, null=True, related_name='subscription_licenses')
+    License_Type = models.CharField(max_length=50, default='Subscription', blank=True, null=True)
+    Entitled_Users = models.IntegerField(default=0, blank=True, null=True)
+    Assigned_Users = models.IntegerField(default=0, blank=True, null=True)
+    Valid_From = models.DateField(default=timezone.localdate, blank=True, null=True)
+    Valid_To = models.DateField(blank=True, null=True)
+    Activated_On = models.DateField(default=timezone.localdate, blank=True, null=True)
+    Last_Activity = models.DateTimeField(default=timezone.now, blank=True, null=True)
+    Status = models.CharField(max_length=50, default='Active', blank=True, null=True)
+    Auto_Renew = models.BooleanField(default=True, blank=True, null=True)
+    Notes = models.TextField(blank=True, null=True)
+    Is_Active = models.BooleanField(default=True, blank=True, null=True)
+    Is_Deleted = models.BooleanField(default=False, blank=True, null=True)
+    Created_By = models.ForeignKey(UserAdmin, on_delete=models.CASCADE, related_name='created_license_master_set', blank=True, null=True)
+    Created_Date = models.DateTimeField(default=timezone.now, blank=True, null=True)
+    Updated_By = models.ForeignKey(UserAdmin, on_delete=models.CASCADE, related_name='updated_license_master_set', blank=True, null=True)
+    Updated_Date = models.DateTimeField(default=timezone.now, blank=True, null=True)
+
+    class Meta:
+        db_table = 'LicenseMaster'
+        ordering = ['-id']
+
+    def save(self, *args, **kwargs):
+        if not self.License_Id:
+            self.License_Id = LicenseMaster_I()
+        if not self.License_Key:
+            self.License_Key = _generate_license_key(self.Product_Id)
+        if self.Customer_Id and not self.Customer_Name:
+            self.Customer_Name = (
+                getattr(self.Customer_Id, 'Organization_Name', None)
+                or getattr(self.Customer_Id, 'Contact_Name', None)
+            )
+        if self.Product_Id and not self.Product_Name:
+            self.Product_Name = getattr(self.Product_Id, 'Product_Name', None)
+        if not self.Plan_Edition_Name:
+            if self.ProductEdition_id and getattr(self.ProductEdition_id, 'Edition_Name', None):
+                self.Plan_Edition_Name = self.ProductEdition_id.Edition_Name
+            elif self.Plan_Id and getattr(self.Plan_Id, 'Plan_Name', None):
+                self.Plan_Edition_Name = self.Plan_Id.Plan_Name
+        if self.Status in ('Suspended', 'Revoked', 'Expired', 'Inactive'):
+            self.Is_Active = False
+        elif self.Status in ('Active', 'Expiring'):
+            self.Is_Active = True
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return self.License_Key or self.License_Id or ''
+
+
+class LicenseEntitlement(models.Model):
+    Entitlement_Id = models.CharField(max_length=50, unique=True, default=LicenseEntitlement_I)
+    Organization_Id = models.ForeignKey(Userorganizationmaster, on_delete=models.CASCADE, blank=True, null=True)
+    License_Id = models.ForeignKey(LicenseMaster, on_delete=models.CASCADE, related_name='entitlements')
+    Entitlement_Name = models.CharField(max_length=250, blank=True, null=True)
+    Entitlement_Type = models.CharField(max_length=50, default='Feature', blank=True, null=True)
+    Feature_Id = models.ForeignKey('ProductFeature', on_delete=models.SET_NULL, blank=True, null=True, related_name='license_entitlements')
+    Addon_Id = models.ForeignKey('AddonMaster', on_delete=models.SET_NULL, blank=True, null=True, related_name='license_entitlements')
+    Module_Id = models.ForeignKey('ModuleMaster', on_delete=models.SET_NULL, blank=True, null=True, related_name='license_entitlements')
+    Qty_Limit = models.CharField(max_length=100, default='Included', blank=True, null=True)
+    Limit_Value = models.IntegerField(blank=True, null=True)
+    Used_Value = models.IntegerField(default=0, blank=True, null=True)
+    Unit = models.CharField(max_length=50, blank=True, null=True)
+    Status = models.CharField(max_length=50, default='Enabled', blank=True, null=True)
+    Description = models.TextField(blank=True, null=True)
+    Is_Active = models.BooleanField(default=True, blank=True, null=True)
+    Is_Deleted = models.BooleanField(default=False, blank=True, null=True)
+    Created_By = models.ForeignKey(UserAdmin, on_delete=models.CASCADE, related_name='created_license_entitlement_set', blank=True, null=True)
+    Created_Date = models.DateTimeField(default=timezone.now, blank=True, null=True)
+    Updated_By = models.ForeignKey(UserAdmin, on_delete=models.CASCADE, related_name='updated_license_entitlement_set', blank=True, null=True)
+    Updated_Date = models.DateTimeField(default=timezone.now, blank=True, null=True)
+
+    class Meta:
+        db_table = 'LicenseEntitlement'
+        ordering = ['-id']
+
+    def save(self, *args, **kwargs):
+        if not self.Entitlement_Id:
+            self.Entitlement_Id = LicenseEntitlement_I()
+        if not self.Entitlement_Name:
+            if self.Feature_Id and getattr(self.Feature_Id, 'Feature_Name', None):
+                self.Entitlement_Name = self.Feature_Id.Feature_Name
+            elif self.Addon_Id and getattr(self.Addon_Id, 'Addon_Name', None):
+                self.Entitlement_Name = self.Addon_Id.Addon_Name
+            elif self.Module_Id and getattr(self.Module_Id, 'Module_name', None):
+                self.Entitlement_Name = self.Module_Id.Module_name
+        if self.Status in ('Disabled', 'Suspended'):
+            self.Is_Active = False
+        elif self.Status == 'Enabled':
+            self.Is_Active = True
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return self.Entitlement_Name or self.Entitlement_Id or ''
+
+
+class LicenseAssignment(models.Model):
+    Assignment_Id = models.CharField(max_length=50, unique=True, default=LicenseAssignment_I)
+    Organization_Id = models.ForeignKey(Userorganizationmaster, on_delete=models.CASCADE, blank=True, null=True)
+    License_Id = models.ForeignKey(LicenseMaster, on_delete=models.CASCADE, related_name='assignments')
+    Customer_Id = models.ForeignKey('Account', on_delete=models.SET_NULL, blank=True, null=True, related_name='license_assignments')
+    Assigned_User_Id = models.ForeignKey(UserAdmin, on_delete=models.SET_NULL, blank=True, null=True, related_name='assigned_licenses')
+    Assignee_Name = models.CharField(max_length=250, blank=True, null=True)
+    Assignee_Email = models.EmailField(blank=True, null=True)
+    Role_Name = models.CharField(max_length=100, blank=True, null=True)
+    Seats_Allocated = models.IntegerField(default=1, blank=True, null=True)
+    Assigned_Date = models.DateTimeField(default=timezone.now, blank=True, null=True)
+    Last_Active = models.DateTimeField(blank=True, null=True)
+    Status = models.CharField(max_length=50, default='Active', blank=True, null=True)
+    Is_Active = models.BooleanField(default=True, blank=True, null=True)
+    Is_Deleted = models.BooleanField(default=False, blank=True, null=True)
+    Created_By = models.ForeignKey(UserAdmin, on_delete=models.CASCADE, related_name='created_license_assignment_set', blank=True, null=True)
+    Created_Date = models.DateTimeField(default=timezone.now, blank=True, null=True)
+    Updated_By = models.ForeignKey(UserAdmin, on_delete=models.CASCADE, related_name='updated_license_assignment_set', blank=True, null=True)
+    Updated_Date = models.DateTimeField(default=timezone.now, blank=True, null=True)
+
+    class Meta:
+        db_table = 'LicenseAssignment'
+        ordering = ['-id']
+
+    def save(self, *args, **kwargs):
+        if not self.Assignment_Id:
+            self.Assignment_Id = LicenseAssignment_I()
+        if not self.Customer_Id and self.License_Id and self.License_Id.Customer_Id:
+            self.Customer_Id = self.License_Id.Customer_Id
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return self.Assignee_Name or self.Assignment_Id or ''
+
+
+class LicenseRenewal(models.Model):
+    Renewal_Id = models.CharField(max_length=50, unique=True, default=LicenseRenewal_I)
+    Organization_Id = models.ForeignKey(Userorganizationmaster, on_delete=models.CASCADE, blank=True, null=True)
+    License_Id = models.ForeignKey(LicenseMaster, on_delete=models.CASCADE, related_name='license_renewals')
+    Previous_Valid_To = models.DateField(blank=True, null=True)
+    New_Valid_To = models.DateField(blank=True, null=True)
+    Extended_Days = models.IntegerField(default=0, blank=True, null=True)
+    Renewal_Type = models.CharField(max_length=50, default='Manual Extension', blank=True, null=True)
+    Renewal_Amount = models.DecimalField(max_digits=12, decimal_places=2, default=0, blank=True, null=True)
+    Renewal_Status = models.CharField(max_length=50, default='Completed', blank=True, null=True)
+    Renewal_Date = models.DateTimeField(default=timezone.now, blank=True, null=True)
+    Notes = models.TextField(blank=True, null=True)
+    Is_Active = models.BooleanField(default=True, blank=True, null=True)
+    Is_Deleted = models.BooleanField(default=False, blank=True, null=True)
+    Created_By = models.ForeignKey(UserAdmin, on_delete=models.CASCADE, related_name='created_license_renewal_set', blank=True, null=True)
+    Created_Date = models.DateTimeField(default=timezone.now, blank=True, null=True)
+    Updated_By = models.ForeignKey(UserAdmin, on_delete=models.CASCADE, related_name='updated_license_renewal_set', blank=True, null=True)
+    Updated_Date = models.DateTimeField(default=timezone.now, blank=True, null=True)
+
+    class Meta:
+        db_table = 'LicenseRenewal'
+        ordering = ['-id']
+
+    def save(self, *args, **kwargs):
+        if not self.Renewal_Id:
+            self.Renewal_Id = LicenseRenewal_I()
+        if self.Previous_Valid_To and self.New_Valid_To and not self.Extended_Days:
+            self.Extended_Days = max(0, (self.New_Valid_To - self.Previous_Valid_To).days)
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return self.Renewal_Id or ''
+
+
+# ==========================================
+# Trial Configuration (Single Table)
+# ==========================================
+
+def TrialConfiguration_I():
+    return _generate_prefixed_code(TrialConfiguration, 'Trial_Id', 'TRL', 9)
+
+
+class TrialConfiguration(models.Model):
+    Trial_Id = models.CharField(max_length=50, unique=True, default=TrialConfiguration_I)
+    Trial_Code = models.CharField(max_length=100, blank=True, null=True)
+    Trial_Plan_Name = models.CharField(max_length=250)
+    Organization_Id = models.ForeignKey(Userorganizationmaster, on_delete=models.CASCADE, blank=True, null=True)
+    Product_Id = models.ForeignKey('ProductMaster', on_delete=models.CASCADE, related_name='trial_configurations')
+    Edition_Id = models.ForeignKey('ProductEdition', on_delete=models.SET_NULL, blank=True, null=True, related_name='trial_configurations')
+    Plan_Id = models.ForeignKey('Plan', on_delete=models.SET_NULL, blank=True, null=True, related_name='trial_configurations')
+    Category_Id = models.ForeignKey('ProductCategory', on_delete=models.SET_NULL, blank=True, null=True, related_name='trial_configurations')
+    Trial_Duration_Days = models.PositiveIntegerField(default=14)
+    Feature_Scope = models.CharField(max_length=50, default='Selected Features', blank=True, null=True)
+    Enabled_Features = models.ManyToManyField('ProductFeature', blank=True, related_name='trial_configurations')
+    Features_Summary = models.CharField(max_length=250, blank=True, null=True)
+    Allow_Conversion_To_Paid = models.BooleanField(default=True, blank=True, null=True)
+    Default_Converted_Plan_Id = models.ForeignKey('Plan', on_delete=models.SET_NULL, blank=True, null=True, related_name='converted_from_trials')
+    Retain_Trial_Data = models.BooleanField(default=True, blank=True, null=True)
+    Auto_Expire_Trial = models.BooleanField(default=True, blank=True, null=True)
+    User_Limit = models.PositiveIntegerField(blank=True, null=True)
+    Storage_Limit_GB = models.DecimalField(max_digits=10, decimal_places=2, blank=True, null=True)
+    Trial_Rules = models.JSONField(default=dict, blank=True, null=True)
+    Conversion_Settings = models.JSONField(default=dict, blank=True, null=True)
+    Email_Notifications = models.JSONField(default=dict, blank=True, null=True)
+    Description = models.TextField(blank=True, null=True)
+    Status = models.CharField(max_length=30, default='Draft', blank=True, null=True)
+    Is_Active = models.BooleanField(default=True, blank=True, null=True)
+    Is_Deleted = models.BooleanField(default=False, blank=True, null=True)
+    Created_By = models.ForeignKey(UserAdmin, on_delete=models.CASCADE, related_name='created_trial_config_set', blank=True, null=True)
+    Created_Date = models.DateTimeField(default=timezone.now, blank=True, null=True)
+    Updated_By = models.ForeignKey(UserAdmin, on_delete=models.CASCADE, related_name='updated_trial_config_set', blank=True, null=True)
+    Updated_Date = models.DateTimeField(default=timezone.now, blank=True, null=True)
+
+    class Meta:
+        db_table = 'TrialConfiguration'
+        ordering = ['-id']
+
+    def save(self, *args, **kwargs):
+        if not self.Trial_Id:
+            self.Trial_Id = TrialConfiguration_I()
+        if not self.Trial_Code:
+            self.Trial_Code = self.Trial_Id
+        if self.Product_Id and not self.Category_Id and getattr(self.Product_Id, 'Category_id', None):
+            self.Category_Id = self.Product_Id.Category_id
+        if self.Status:
+            status_lower = str(self.Status).strip().lower()
+            if status_lower == 'active':
+                self.Is_Active = True
+            elif status_lower in ('inactive', 'draft'):
+                self.Is_Active = False
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return self.Trial_Plan_Name or self.Trial_Id or ''
+
+
+

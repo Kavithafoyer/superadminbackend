@@ -802,3 +802,216 @@ class ProductMasterLookupsAPITests(SimpleTestCase):
         self.assertEqual(body["results"][0]["Category"], "Business Suite")
         self.assertEqual(body["results"][1]["Category_id"], None)
         self.assertEqual(body["results"][1]["Category_Name"], "Education")
+
+
+class LicenseEntitlementManagementTests(SimpleTestCase):
+    """Tests for LicenseMaster, LicenseEntitlement, LicenseAssignment, LicenseRenewal CRUD, Filter, Action & KPI APIs."""
+
+    def setUp(self):
+        self.factory = APIRequestFactory()
+        self.user = SimpleNamespace(is_authenticated=True, pk=1, id=1)
+
+    def test_license_urls_resolve(self):
+        from CRMSuperAdmin.views import (
+            LicenseActionAPI,
+            LicenseAssignmentCRUD,
+            LicenseEntitlementCRUD,
+            LicenseEntitlementKPIAPI,
+            LicenseLookupsAPI,
+            LicenseMasterCRUD,
+            LicenseMasterExportAPI,
+            LicenseMasterFilter,
+            LicenseMasterKPIAPI,
+            LicenseMasterListwithPagination,
+            LicenseMasterSearch,
+            LicenseMasterlistwithoutpaginaton,
+            LicenseRenewalCRUD,
+            LicenseUsageComplianceAPI,
+        )
+
+        cases = [
+            ("license-master-crud", LicenseMasterCRUD),
+            ("license-master-list-paginated", LicenseMasterListwithPagination),
+            ("license-master-search", LicenseMasterSearch),
+            ("license-master-list-without-pagination", LicenseMasterlistwithoutpaginaton),
+            ("license-master-filter", LicenseMasterFilter),
+            ("license-master-kpi", LicenseMasterKPIAPI),
+            ("license-action", LicenseActionAPI),
+            ("license-usage-compliance", LicenseUsageComplianceAPI),
+            ("license-lookups", LicenseLookupsAPI),
+            ("license-master-export", LicenseMasterExportAPI),
+            ("license-entitlement-crud", LicenseEntitlementCRUD),
+            ("license-entitlement-kpi", LicenseEntitlementKPIAPI),
+            ("license-assignment-crud", LicenseAssignmentCRUD),
+            ("license-renewal-crud", LicenseRenewalCRUD),
+        ]
+        for name, view_cls in cases:
+            url = reverse(name, kwargs={"tenant_name": "default"})
+            self.assertEqual(resolve(url).func.view_class, view_cls)
+
+    def test_apply_license_scope_uses_icontains_not_iexact(self):
+        from CRMSuperAdmin.views import _apply_license_scope
+
+        qs = MagicMock()
+        qs.filter.return_value = qs
+
+        _apply_license_scope(
+            qs,
+            {
+                "Product": "CRM",
+                "Plan_Edition": "Professional",
+                "Status": "Active",
+                "Customer_Id": "Euro Textiles",
+                "License_Type": "Subscription",
+                "License_Key": "PGT-CRM",
+                "search": "Euro",
+            },
+        )
+        filter_text = " ".join(str(c) for c in qs.filter.call_args_list)
+        self.assertIn("icontains", filter_text)
+        self.assertNotIn("iexact", filter_text)
+
+    @patch("CRMSuperAdmin.views.LicenseRenewal")
+    @patch("CRMSuperAdmin.views.LicenseAssignment")
+    @patch("CRMSuperAdmin.views.LicenseEntitlement")
+    @patch("CRMSuperAdmin.views.LicenseMaster")
+    def test_license_kpi_api_returns_4_cards_and_metrics(
+        self, mock_lic, mock_ent, mock_assign, mock_ren
+    ):
+        import json
+        from CRMSuperAdmin.views import LicenseMasterKPIAPI
+
+        base_qs = MagicMock()
+        base_qs.filter.return_value = base_qs
+        base_qs.distinct.return_value = base_qs
+        base_qs.count.side_effect = [10, 1, 1, 2, 1, 7, 3]
+        base_qs.aggregate.return_value = {"entitled": 250, "assigned": 180}
+        ann_qs = MagicMock()
+        ann_qs.__iter__.return_value = iter([])
+        ann_qs.order_by.return_value = []
+        base_qs.values.return_value.annotate.return_value = ann_qs
+
+        mock_lic.objects.filter.return_value = base_qs
+        mock_ent.objects.filter.return_value.count.return_value = 12
+        mock_assign.objects.filter.return_value.count.return_value = 5
+        mock_ren.objects.filter.return_value.count.return_value = 2
+
+        req = self.factory.get("/default/superadmin/LicenseMasterKPI/")
+        force_authenticate(req, user=self.user)
+        resp = LicenseMasterKPIAPI.as_view()(req, tenant_name="default")
+
+        self.assertEqual(resp.status_code, 200)
+        body = json.loads(resp.content)
+        self.assertTrue(body["status"])
+        self.assertEqual(body["total_licenses"], 10)
+        self.assertEqual(body["active_licenses"], 7)
+        self.assertEqual(body["expiring_30_days"], 3)
+        self.assertEqual(body["suspended_revoked"], 2)
+        self.assertEqual(len(body["cards"]), 4)
+        self.assertEqual(body["seat_utilization_pct"], 72.0)
+
+    def test_license_serializer_resolves_fks_with_icontains(self):
+        from CRMSuperAdmin.serializer import _LicenseAuditSerializerMixin
+
+        model_cls = MagicMock()
+        model_cls.objects.filter.return_value.order_by.return_value.first.return_value = SimpleNamespace(id=42)
+
+        resolved = _LicenseAuditSerializerMixin._resolve_fk_pk(
+            model_cls, "Euro", "Organization_Name", "Contact_Name"
+        )
+        self.assertEqual(resolved, 42)
+        filter_text = str(model_cls.objects.filter.call_args)
+        self.assertIn("icontains", filter_text)
+        self.assertNotIn("iexact", filter_text)
+
+
+class TrialConfigurationTests(SimpleTestCase):
+    """Tests for single-table TrialConfiguration CRUD, Filter, Search & KPI APIs."""
+
+    def setUp(self):
+        self.factory = APIRequestFactory()
+        self.user = SimpleNamespace(is_authenticated=True, pk=1, id=1)
+
+    def test_trial_configuration_urls_resolve(self):
+        from CRMSuperAdmin.views import (
+            TrialConfigurationCRUD,
+            TrialConfigurationFilter,
+            TrialConfigurationKPIAPI,
+            TrialConfigurationListwithPagination,
+            TrialConfigurationSearch,
+            TrialConfigurationlistwithoutpaginaton,
+        )
+
+        cases = [
+            ("trial-configuration-crud", TrialConfigurationCRUD),
+            ("trial-configuration-list-paginated", TrialConfigurationListwithPagination),
+            ("trial-configuration-search", TrialConfigurationSearch),
+            ("trial-configuration-list-without-pagination", TrialConfigurationlistwithoutpaginaton),
+            ("trial-configuration-filter", TrialConfigurationFilter),
+            ("trial-configuration-kpi", TrialConfigurationKPIAPI),
+        ]
+        for name, view_cls in cases:
+            url = reverse(name, kwargs={"tenant_name": "default"})
+            self.assertEqual(resolve(url).func.view_class, view_cls)
+
+    def test_apply_trial_configuration_scope_uses_icontains(self):
+        from CRMSuperAdmin.views import _apply_trial_configuration_scope
+
+        qs = MagicMock()
+        qs.filter.return_value = qs
+
+        _apply_trial_configuration_scope(
+            qs,
+            {
+                "Trial_Plan_Name": "Custom Product Trial",
+                "Product": "CRM",
+                "Edition": "Standard",
+                "Plan": "Standard",
+                "Category": "Business",
+                "Status": "Draft",
+                "Feature_Scope": "Select Features",
+                "search": "Custom",
+            },
+        )
+        filter_text = " ".join(str(c) for c in qs.filter.call_args_list)
+        self.assertIn("icontains", filter_text)
+        self.assertNotIn("iexact", filter_text)
+
+    @patch("CRMSuperAdmin.views.Subscriptions")
+    @patch("CRMSuperAdmin.views.TrialConfiguration")
+    def test_trial_configuration_kpi_returns_4_cards(self, mock_tc, mock_subs):
+        import json
+        from CRMSuperAdmin.views import TrialConfigurationKPIAPI
+
+        tc_qs = MagicMock()
+        tc_qs.filter.return_value = tc_qs
+        tc_qs.count.side_effect = [7, 6, 1, 0]
+        tc_qs.aggregate.return_value = {"avg_days": 14.0}
+        ann_qs = MagicMock()
+        ann_qs.__iter__.return_value = iter([])
+        ann_qs.order_by.return_value = []
+        tc_qs.values.return_value.annotate.return_value = ann_qs
+        mock_tc.objects.filter.return_value = tc_qs
+
+        sub_qs = MagicMock()
+        sub_qs.filter.return_value = sub_qs
+        sub_qs.exclude.return_value = sub_qs
+        sub_qs.count.side_effect = [1284, 1000, 680]
+        mock_subs.objects.filter.return_value = sub_qs
+
+        req = self.factory.get("/default/superadmin/TrialConfigurationKPI/")
+        force_authenticate(req, user=self.user)
+        resp = TrialConfigurationKPIAPI.as_view()(req, tenant_name="default")
+
+        self.assertEqual(resp.status_code, 200)
+        body = json.loads(resp.content)
+        self.assertTrue(body["status"])
+        self.assertEqual(body["active_trial_plans"], 6)
+        self.assertEqual(body["trials_in_progress"], 1284)
+        self.assertEqual(body["trial_conversions_pct"], 68.0)
+        self.assertEqual(body["trial_conversions_label"], "68%")
+        self.assertEqual(body["average_trial_duration_days"], 14.0)
+        self.assertEqual(body["average_trial_duration_label"], "14 Days")
+        self.assertEqual(len(body["cards"]), 4)
+
+

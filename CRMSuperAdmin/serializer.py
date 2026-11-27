@@ -2707,6 +2707,7 @@ class AccountSerializerpartner(serializers.ModelSerializer):
             instance.Date_Of_Birth = instance.Date_Of_Birth.date()
         return super().to_representation(instance)
 
+
 class AccountSerializerpartners(serializers.ModelSerializer):
     Created_Date = SafeDateField(required=False, allow_null=True)
     Updated_Date = SafeDateField(required=False, allow_null=True)
@@ -2726,6 +2727,516 @@ class AccountSerializerpartners(serializers.ModelSerializer):
         if hasattr(instance, 'Date_Of_Birth') and isinstance(instance.Date_Of_Birth, datetime):
             instance.Date_Of_Birth = instance.Date_Of_Birth.date()
         return super().to_representation(instance)
+
+
+# ==========================================
+# License & Entitlement Management Serializers
+# ==========================================
+
+class _LicenseAuditSerializerMixin(serializers.ModelSerializer):
+    """Shared display helpers, FK string resolution via icontains, and audit defaults."""
+
+    created_by_name = serializers.SerializerMethodField(read_only=True)
+    updated_by_name = serializers.SerializerMethodField(read_only=True)
+    organization_name = serializers.SerializerMethodField(read_only=True)
+
+    @staticmethod
+    def _normalize_data(data):
+        if hasattr(data, 'dict'):
+            return data.dict()
+        if hasattr(data, 'copy'):
+            return data.copy()
+        return dict(data)
+
+    @staticmethod
+    def _inject_audit_defaults(data, is_partial=False):
+        if is_partial:
+            return
+        if not data.get('Organization_Id'):
+            first_org = Userorganizationmaster.objects.first()
+            if first_org:
+                data['Organization_Id'] = first_org.id
+        if not data.get('Created_By'):
+            first_user = UserAdmin.objects.first()
+            if first_user:
+                data['Created_By'] = first_user.id
+        if not data.get('Updated_By'):
+            data['Updated_By'] = data.get('Created_By')
+
+    @staticmethod
+    def _resolve_fk_pk(model_cls, raw_val, *search_fields):
+        if raw_val in (None, ''):
+            return None
+        if hasattr(raw_val, 'id'):
+            return raw_val.id
+        if isinstance(raw_val, dict):
+            raw_val = raw_val.get('id') or raw_val.get('value')
+        if isinstance(raw_val, int):
+            return raw_val
+        text = str(raw_val).strip()
+        if text.isdigit():
+            return int(text)
+        if not text or not search_fields:
+            return raw_val
+        query = Q()
+        for field_name in search_fields:
+            query |= Q(**{f"{field_name}__icontains": text})
+        obj = model_cls.objects.filter(query).order_by('id').first()
+        return obj.id if obj else raw_val
+
+    @staticmethod
+    def _format_user_display(user_obj):
+        if not user_obj:
+            return None
+        first = getattr(user_obj, 'First_Name', '') or ''
+        last = getattr(user_obj, 'Last_Name', '') or ''
+        full = f"{first} {last}".strip()
+        return full or getattr(user_obj, 'username', None)
+
+    def get_created_by_name(self, obj):
+        return self._format_user_display(getattr(obj, 'Created_By', None))
+
+    def get_updated_by_name(self, obj):
+        return self._format_user_display(getattr(obj, 'Updated_By', None))
+
+    def get_organization_name(self, obj):
+        org = getattr(obj, 'Organization_Id', None)
+        return (getattr(org, 'Organization_Name', None) or str(org)) if org else None
+
+
+class LicenseEntitlementSerializer(_LicenseAuditSerializerMixin):
+    license_key = serializers.SerializerMethodField(read_only=True)
+    feature_name = serializers.SerializerMethodField(read_only=True)
+    addon_name = serializers.SerializerMethodField(read_only=True)
+    module_name = serializers.SerializerMethodField(read_only=True)
+
+    class Meta:
+        model = LicenseEntitlement
+        fields = '__all__'
+
+    def to_internal_value(self, data):
+        data = self._normalize_data(data)
+        if 'license_id' in data and 'License_Id' not in data:
+            data['License_Id'] = data.pop('license_id')
+        if 'License_Id' in data:
+            data['License_Id'] = self._resolve_fk_pk(
+                LicenseMaster, data.get('License_Id'), 'License_Id', 'License_Key'
+            )
+        if 'Feature_Id' in data:
+            data['Feature_Id'] = self._resolve_fk_pk(
+                ProductFeature, data.get('Feature_Id'), 'Feature_Id', 'Feature_Code', 'Feature_Name'
+            )
+        if 'Addon_Id' in data:
+            data['Addon_Id'] = self._resolve_fk_pk(
+                AddonMaster, data.get('Addon_Id'), 'Addon_Code', 'Addon_Name'
+            )
+        if 'Module_Id' in data:
+            data['Module_Id'] = self._resolve_fk_pk(
+                ModuleMaster, data.get('Module_Id'), 'ModuleMasterId', 'Module_Code', 'Module_name'
+            )
+        self._inject_audit_defaults(data, is_partial=self.partial)
+        return super().to_internal_value(data)
+
+    def get_license_key(self, obj):
+        lic = getattr(obj, 'License_Id', None)
+        return getattr(lic, 'License_Key', None) if lic else None
+
+    def get_feature_name(self, obj):
+        feat = getattr(obj, 'Feature_Id', None)
+        return getattr(feat, 'Feature_Name', None) if feat else None
+
+    def get_addon_name(self, obj):
+        addon = getattr(obj, 'Addon_Id', None)
+        return getattr(addon, 'Addon_Name', None) if addon else None
+
+    def get_module_name(self, obj):
+        mod = getattr(obj, 'Module_Id', None)
+        return getattr(mod, 'Module_name', None) if mod else None
+
+
+class LicenseAssignmentSerializer(_LicenseAuditSerializerMixin):
+    license_key = serializers.SerializerMethodField(read_only=True)
+    customer_name = serializers.SerializerMethodField(read_only=True)
+    assigned_user_name = serializers.SerializerMethodField(read_only=True)
+
+    class Meta:
+        model = LicenseAssignment
+        fields = '__all__'
+
+    def to_internal_value(self, data):
+        data = self._normalize_data(data)
+        if 'License_Id' in data:
+            data['License_Id'] = self._resolve_fk_pk(
+                LicenseMaster, data.get('License_Id'), 'License_Id', 'License_Key'
+            )
+        if 'Customer_Id' in data:
+            data['Customer_Id'] = self._resolve_fk_pk(
+                Account, data.get('Customer_Id'), 'Account_Id', 'Organization_Name', 'Contact_Name'
+            )
+        self._inject_audit_defaults(data, is_partial=self.partial)
+        return super().to_internal_value(data)
+
+    def get_license_key(self, obj):
+        lic = getattr(obj, 'License_Id', None)
+        return getattr(lic, 'License_Key', None) if lic else None
+
+    def get_customer_name(self, obj):
+        cust = getattr(obj, 'Customer_Id', None)
+        if cust:
+            return getattr(cust, 'Organization_Name', None) or getattr(cust, 'Contact_Name', None)
+        lic = getattr(obj, 'License_Id', None)
+        return getattr(lic, 'Customer_Name', None) if lic else None
+
+    def get_assigned_user_name(self, obj):
+        return self._format_user_display(getattr(obj, 'Assigned_User_Id', None)) or obj.Assignee_Name
+
+
+class LicenseRenewalSerializer(_LicenseAuditSerializerMixin):
+    license_key = serializers.SerializerMethodField(read_only=True)
+    customer_name = serializers.SerializerMethodField(read_only=True)
+    product_name = serializers.SerializerMethodField(read_only=True)
+
+    class Meta:
+        model = LicenseRenewal
+        fields = '__all__'
+
+    def to_internal_value(self, data):
+        data = self._normalize_data(data)
+        if 'License_Id' in data:
+            data['License_Id'] = self._resolve_fk_pk(
+                LicenseMaster, data.get('License_Id'), 'License_Id', 'License_Key'
+            )
+        self._inject_audit_defaults(data, is_partial=self.partial)
+        return super().to_internal_value(data)
+
+    def get_license_key(self, obj):
+        lic = getattr(obj, 'License_Id', None)
+        return getattr(lic, 'License_Key', None) if lic else None
+
+    def get_customer_name(self, obj):
+        lic = getattr(obj, 'License_Id', None)
+        if not lic:
+            return None
+        return lic.Customer_Name or (getattr(lic.Customer_Id, 'Organization_Name', None) if lic.Customer_Id else None)
+
+    def get_product_name(self, obj):
+        lic = getattr(obj, 'License_Id', None)
+        if not lic:
+            return None
+        return lic.Product_Name or (getattr(lic.Product_Id, 'Product_Name', None) if lic.Product_Id else None)
+
+
+class LicenseMasterSerializer(_LicenseAuditSerializerMixin):
+    Valid_From = SafeDateField(required=False, allow_null=True)
+    Valid_To = SafeDateField(required=False, allow_null=True)
+    Activated_On = SafeDateField(required=False, allow_null=True)
+    customer_name = serializers.SerializerMethodField(read_only=True)
+    product_name = serializers.SerializerMethodField(read_only=True)
+    product_code = serializers.SerializerMethodField(read_only=True)
+    plan_name = serializers.SerializerMethodField(read_only=True)
+    edition_name = serializers.SerializerMethodField(read_only=True)
+    plan_edition_display = serializers.SerializerMethodField(read_only=True)
+    subscription_code = serializers.SerializerMethodField(read_only=True)
+    entitlements_count = serializers.SerializerMethodField(read_only=True)
+    entitlements = serializers.SerializerMethodField(read_only=True)
+    is_expiring_soon = serializers.SerializerMethodField(read_only=True)
+    days_to_expiry = serializers.SerializerMethodField(read_only=True)
+
+    class Meta:
+        model = LicenseMaster
+        fields = '__all__'
+
+    def to_internal_value(self, data):
+        data = self._normalize_data(data)
+        self._initial_entitlements = data.pop('entitlements', None)
+
+        alias_map = {
+            'customer_id': 'Customer_Id',
+            'tenant_id': 'Customer_Id',
+            'product_id': 'Product_Id',
+            'plan_id': 'Plan_Id',
+            'edition_id': 'ProductEdition_id',
+            'product_edition_id': 'ProductEdition_id',
+            'subscription_id': 'Subscription_Id',
+            'users': 'Entitled_Users',
+            'entitled_users': 'Entitled_Users',
+            'valid_from': 'Valid_From',
+            'valid_to': 'Valid_To',
+            'status': 'Status',
+            'license_type': 'License_Type',
+        }
+        for src_key, dst_key in alias_map.items():
+            if src_key in data and dst_key not in data:
+                data[dst_key] = data.pop(src_key)
+
+        if 'Customer_Id' in data:
+            data['Customer_Id'] = self._resolve_fk_pk(
+                Account, data.get('Customer_Id'), 'Account_Id', 'Organization_Name', 'Contact_Name'
+            )
+        if 'Product_Id' in data:
+            data['Product_Id'] = self._resolve_fk_pk(
+                ProductMaster, data.get('Product_Id'), 'Product_Code', 'Product_Name'
+            )
+        if 'Plan_Id' in data:
+            data['Plan_Id'] = self._resolve_fk_pk(
+                Plan, data.get('Plan_Id'), 'Plan_Id', 'Plan_Name'
+            )
+        if 'ProductEdition_id' in data:
+            data['ProductEdition_id'] = self._resolve_fk_pk(
+                ProductEdition, data.get('ProductEdition_id'), 'Edition_Id', 'Edition_Code', 'Edition_Name'
+            )
+        if 'Subscription_Id' in data:
+            data['Subscription_Id'] = self._resolve_fk_pk(
+                Subscriptions, data.get('Subscription_Id'), 'Subscription_Id', 'Subscription_Name'
+            )
+
+        self._inject_audit_defaults(data, is_partial=self.partial)
+        return super().to_internal_value(data)
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        valid_from = attrs.get('Valid_From', getattr(self.instance, 'Valid_From', None))
+        valid_to = attrs.get('Valid_To', getattr(self.instance, 'Valid_To', None))
+        if valid_from and valid_to and valid_to < valid_from:
+            raise serializers.ValidationError({'Valid_To': 'Valid_To must be on or after Valid_From.'})
+        return attrs
+
+    @transaction.atomic
+    def create(self, validated_data):
+        license_obj = super().create(validated_data)
+        self._sync_initial_entitlements(license_obj)
+        return license_obj
+
+    def _sync_initial_entitlements(self, license_obj):
+        items = getattr(self, '_initial_entitlements', None)
+        if not isinstance(items, list):
+            return
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            payload = dict(item)
+            payload['License_Id'] = license_obj.id
+            if not payload.get('Organization_Id') and license_obj.Organization_Id_id:
+                payload['Organization_Id'] = license_obj.Organization_Id_id
+            if not payload.get('Created_By') and license_obj.Created_By_id:
+                payload['Created_By'] = license_obj.Created_By_id
+            ent_ser = LicenseEntitlementSerializer(data=payload)
+            if ent_ser.is_valid(raise_exception=True):
+                ent_ser.save()
+
+    def get_customer_name(self, obj):
+        if obj.Customer_Id:
+            return getattr(obj.Customer_Id, 'Organization_Name', None) or getattr(obj.Customer_Id, 'Contact_Name', None)
+        return obj.Customer_Name
+
+    def get_product_name(self, obj):
+        if obj.Product_Id:
+            return getattr(obj.Product_Id, 'Product_Name', None)
+        return obj.Product_Name
+
+    def get_product_code(self, obj):
+        if obj.Product_Id:
+            return getattr(obj.Product_Id, 'Product_Code', None)
+        return None
+
+    def get_plan_name(self, obj):
+        return getattr(obj.Plan_Id, 'Plan_Name', None) if obj.Plan_Id else None
+
+    def get_edition_name(self, obj):
+        return getattr(obj.ProductEdition_id, 'Edition_Name', None) if obj.ProductEdition_id else None
+
+    def get_plan_edition_display(self, obj):
+        return (
+            obj.Plan_Edition_Name
+            or self.get_edition_name(obj)
+            or self.get_plan_name(obj)
+            or ''
+        )
+
+    def get_subscription_code(self, obj):
+        return getattr(obj.Subscription_Id, 'Subscription_Id', None) if obj.Subscription_Id else None
+
+    def get_entitlements_count(self, obj):
+        return obj.entitlements.filter(Is_Deleted=False).count()
+
+    def get_entitlements(self, obj):
+        qs = obj.entitlements.filter(Is_Deleted=False).order_by('id')
+        return LicenseEntitlementSerializer(qs, many=True).data
+
+    def get_days_to_expiry(self, obj):
+        if not obj.Valid_To:
+            return None
+        return (obj.Valid_To - timezone.localdate()).days
+
+    def get_is_expiring_soon(self, obj):
+        days = self.get_days_to_expiry(obj)
+        if days is None:
+            return False
+        status_lower = (obj.Status or '').lower()
+        return status_lower == 'expiring' or (0 <= days <= 30 and status_lower in ('active', 'expiring'))
+
+
+# ==========================================
+# Trial Configuration Serializer (Single Table)
+# ==========================================
+
+class TrialConfigurationSerializer(_LicenseAuditSerializerMixin):
+    product_name = serializers.SerializerMethodField(read_only=True)
+    product_code = serializers.SerializerMethodField(read_only=True)
+    edition_name = serializers.SerializerMethodField(read_only=True)
+    plan_name = serializers.SerializerMethodField(read_only=True)
+    category_name = serializers.SerializerMethodField(read_only=True)
+    default_converted_plan_name = serializers.SerializerMethodField(read_only=True)
+    enabled_features_details = serializers.SerializerMethodField(read_only=True)
+    enabled_features_count = serializers.SerializerMethodField(read_only=True)
+    duration_label = serializers.SerializerMethodField(read_only=True)
+
+    class Meta:
+        model = TrialConfiguration
+        fields = '__all__'
+
+    def _resolve_features_list(self, raw_features):
+        if raw_features in (None, ''):
+            return []
+        if isinstance(raw_features, str):
+            raw_txt = raw_features.strip()
+            if raw_txt.startswith('['):
+                try:
+                    raw_features = json.loads(raw_txt)
+                except Exception:
+                    raw_features = [x.strip() for x in raw_txt.split(',') if x.strip()]
+            else:
+                raw_features = [x.strip() for x in raw_txt.split(',') if x.strip()]
+        if not isinstance(raw_features, list):
+            raw_features = [raw_features]
+
+        resolved_ids = []
+        for item in raw_features:
+            pk = self._resolve_fk_pk(ProductFeature, item, 'Feature_Id', 'Feature_Code', 'Feature_Name')
+            if isinstance(pk, int) and pk not in resolved_ids:
+                resolved_ids.append(pk)
+        return resolved_ids
+
+    def to_internal_value(self, data):
+        data = self._normalize_data(data)
+
+        if 'Trial_Id' in data and not data.get('Trial_Code'):
+            data['Trial_Code'] = data['Trial_Id']
+        elif 'Trial_Code' in data and not data.get('Trial_Id'):
+            data['Trial_Id'] = data['Trial_Code']
+
+        alias_map = {
+            'trial_plan_name': 'Trial_Plan_Name',
+            'plan_name': 'Trial_Plan_Name',
+            'product_id': 'Product_Id',
+            'product': 'Product_Id',
+            'edition_id': 'Edition_Id',
+            'edition': 'Edition_Id',
+            'plan_id': 'Plan_Id',
+            'category_id': 'Category_Id',
+            'trial_duration_days': 'Trial_Duration_Days',
+            'trial_duration': 'Trial_Duration_Days',
+            'duration': 'Trial_Duration_Days',
+            'feature_scope': 'Feature_Scope',
+            'features_summary': 'Features_Summary',
+            'enabled_features': 'Enabled_Features',
+            'allow_conversion_to_paid': 'Allow_Conversion_To_Paid',
+            'default_converted_plan_id': 'Default_Converted_Plan_Id',
+            'retain_trial_data': 'Retain_Trial_Data',
+            'auto_expire_trial': 'Auto_Expire_Trial',
+            'user_limit': 'User_Limit',
+            'storage_limit_gb': 'Storage_Limit_GB',
+            'storage_limit': 'Storage_Limit_GB',
+            'trial_rules': 'Trial_Rules',
+            'conversion_settings': 'Conversion_Settings',
+            'email_notifications': 'Email_Notifications',
+            'description': 'Description',
+            'status': 'Status',
+        }
+        for src_key, dst_key in alias_map.items():
+            if src_key in data and dst_key not in data:
+                data[dst_key] = data.pop(src_key)
+
+        if data.pop('save_as_draft', False):
+            data['Status'] = 'Draft'
+            data['Is_Active'] = False
+
+        if 'Product_Id' in data:
+            data['Product_Id'] = self._resolve_fk_pk(
+                ProductMaster, data.get('Product_Id'), 'Product_Code', 'Product_Name'
+            )
+        if 'Edition_Id' in data:
+            data['Edition_Id'] = self._resolve_fk_pk(
+                ProductEdition, data.get('Edition_Id'), 'Edition_Id', 'Edition_Code', 'Edition_Name'
+            )
+        if 'Plan_Id' in data:
+            data['Plan_Id'] = self._resolve_fk_pk(
+                Plan, data.get('Plan_Id'), 'Plan_Id', 'Plan_Name'
+            )
+        if 'Default_Converted_Plan_Id' in data:
+            data['Default_Converted_Plan_Id'] = self._resolve_fk_pk(
+                Plan, data.get('Default_Converted_Plan_Id'), 'Plan_Id', 'Plan_Name'
+            )
+        if 'Category_Id' in data:
+            data['Category_Id'] = self._resolve_fk_pk(
+                ProductCategory, data.get('Category_Id'), 'Category_Id', 'Category_Code', 'Category_Name'
+            )
+        if 'Enabled_Features' in data:
+            data['Enabled_Features'] = self._resolve_features_list(data.get('Enabled_Features'))
+
+        if not self.partial and not data.get('Product_Id'):
+            first_prod = ProductMaster.objects.first()
+            if first_prod:
+                data['Product_Id'] = first_prod.id
+
+        self._inject_audit_defaults(data, is_partial=self.partial)
+        return super().to_internal_value(data)
+
+    def to_representation(self, instance):
+        ret = super().to_representation(instance)
+        t_id = getattr(instance, 'Trial_Id', None) or getattr(instance, 'Trial_Code', None)
+        ret['Trial_Id'] = t_id
+        if not ret.get('Trial_Code'):
+            ret['Trial_Code'] = t_id
+        return ret
+
+    def get_product_name(self, obj):
+        return getattr(obj.Product_Id, 'Product_Name', None) if obj.Product_Id else None
+
+    def get_product_code(self, obj):
+        return getattr(obj.Product_Id, 'Product_Code', None) if obj.Product_Id else None
+
+    def get_edition_name(self, obj):
+        return getattr(obj.Edition_Id, 'Edition_Name', None) if obj.Edition_Id else None
+
+    def get_plan_name(self, obj):
+        return getattr(obj.Plan_Id, 'Plan_Name', None) if obj.Plan_Id else None
+
+    def get_category_name(self, obj):
+        return getattr(obj.Category_Id, 'Category_Name', None) if obj.Category_Id else None
+
+    def get_default_converted_plan_name(self, obj):
+        return getattr(obj.Default_Converted_Plan_Id, 'Plan_Name', None) if obj.Default_Converted_Plan_Id else None
+
+    def get_enabled_features_details(self, obj):
+        return [
+            {
+                'id': feat.id,
+                'Feature_Id': feat.Feature_Id,
+                'Feature_Code': feat.Feature_Code,
+                'Feature_Name': feat.Feature_Name,
+            }
+            for feat in obj.Enabled_Features.filter(Is_Deleted=False).order_by('id')
+        ]
+
+    def get_enabled_features_count(self, obj):
+        return obj.Enabled_Features.filter(Is_Deleted=False).count()
+
+    def get_duration_label(self, obj):
+        days = getattr(obj, 'Trial_Duration_Days', None)
+        return f"{days} Days" if days is not None else None
+
+
 
 
 
