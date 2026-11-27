@@ -418,6 +418,27 @@ class ProductFeatureSerializer(serializers.ModelSerializer):
 
         return super().to_internal_value(data)
 
+    def validate(self, attrs):
+        product = attrs.get('Product_Id', getattr(self.instance, 'Product_Id', None))
+        module = attrs.get('Module_Id', getattr(self.instance, 'Module_Id', None))
+        if self.instance and self.instance.Module_Id_id and module != self.instance.Module_Id:
+            raise serializers.ValidationError({'Module_Id': 'A feature cannot be moved to another module.'})
+        if module and not attrs.get('Is_Deleted'):
+            if module.Is_Deleted or not module.Product_Id or module.Product_Id.Is_Deleted:
+                raise serializers.ValidationError({'Module_Id': 'Select a saved module for an available product.'})
+            if product and product.pk != module.Product_Id_id:
+                raise serializers.ValidationError({'Product_Id': 'This module belongs to another product.'})
+            attrs['Product_Id'] = module.Product_Id
+        if not attrs.get('Is_Deleted'):
+            if product and product.Is_Deleted:
+                raise serializers.ValidationError({'Product_Id': 'Select an available product.'})
+            if self.instance and self.instance.Product_Id_id and product != self.instance.Product_Id:
+                raise serializers.ValidationError({'Product_Id': 'A feature cannot be moved to another product.'})
+        if any(edition.Is_Deleted or edition.Product_Id_id != getattr(product, 'pk', None)
+               for edition in attrs.get('Edition_Ids', [])):
+            raise serializers.ValidationError({'Edition_Ids': 'Select editions belonging to this product.'})
+        return attrs
+
     def to_representation(self, instance):
         ret = super().to_representation(instance)
         feat_id = getattr(instance, 'Feature_Id', None) or getattr(instance, 'Feature_Code', None)
@@ -1905,6 +1926,15 @@ class ModuleMasterSerializer(serializers.ModelSerializer):
     organization_name = serializers.SerializerMethodField(read_only=True)
     submodules = serializers.SerializerMethodField(read_only=True)
 
+    feature_count = serializers.SerializerMethodField()
+    edition_count = serializers.SerializerMethodField()
+
+    def get_feature_count(self, obj):
+        return obj.owned_features.filter(Is_Deleted=False, Product_Id_id=obj.Product_Id_id).count()
+
+    def get_edition_count(self, obj):
+        return obj.Product_Edition_id.filter(Is_Deleted=False, Product_Id_id=obj.Product_Id_id).count()
+
     class Meta:
         model = ModuleMaster
         fields = '__all__'
@@ -1954,6 +1984,15 @@ class ModuleMasterSerializer(serializers.ModelSerializer):
             data['Updated_By'] = data.get('Created_By')
 
         return super().to_internal_value(data)
+
+    def validate(self, attrs):
+        if 'Product_Id' in attrs:
+            product = attrs['Product_Id']
+            if not product or product.Is_Deleted:
+                raise serializers.ValidationError({'Product_Id': 'Select an available product.'})
+            if self.instance and self.instance.Product_Id_id not in (None, product.pk):
+                raise serializers.ValidationError({'Product_Id': 'A module cannot be moved to another product.'})
+        return attrs
 
     def to_representation(self, instance):
         ret = super().to_representation(instance)

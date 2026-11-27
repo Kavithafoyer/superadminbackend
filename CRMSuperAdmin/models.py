@@ -995,6 +995,13 @@ class ProductFeature(models.Model):
         blank=True,
         null=True
     )
+    Module_Id = models.ForeignKey(
+        'ModuleMaster', on_delete=models.PROTECT, related_name='owned_features',
+        null=True, blank=True,
+    )
+    Edition_Ids = models.ManyToManyField(
+        'ProductEdition', blank=True, related_name='catalog_features',
+    )
     ProductCategory_id = models.ForeignKey(ProductCategory , on_delete=models.CASCADE,blank=True,null=True,related_name='product_featurecatname')
 
     Feature_Code = models.CharField(max_length=100,blank=True,null=True)
@@ -1482,6 +1489,10 @@ def ModuleMaster_I():
 class ModuleMaster(models.Model):
     ModuleMasterId = models.CharField(unique=True, max_length=50, default=ModuleMaster_I)
     Organization_Id = models.ForeignKey(Userorganizationmaster, on_delete=models.CASCADE, blank=True, null=True)
+    Product_Id = models.ForeignKey(
+        ProductMaster, on_delete=models.PROTECT, related_name='product_modules',
+        null=True, blank=True,
+    )
     Module_Code = models.CharField(max_length=100, blank=True, null=True)
     Module_name = models.CharField(max_length=250, blank=True, null=True)
     Description = models.TextField(blank=True, null=True)
