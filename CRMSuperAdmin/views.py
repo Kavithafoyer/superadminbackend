@@ -21347,5 +21347,42 @@ class ProductMasterdropdownlist(APIView):
 
 
 
+class AddonTieredPricingFilter(ListAPIView):
+    queryset=AddonTieredPricing.objects.all()
+    serializer_class=AddonTieredPricingSerializer
 
+    def post(self,request,*args,**kwargs):
+        try:
+            data=request.data
+            filter_data={"Is_Deleted":False}
+
+            if data.get("Created_By"):
+                filter_data["Created_By"]=data.get("Created_By")
+            if data.get("fromdate") and data.get("todate"):
+                filter_data["Created_Date__date__range"]=[data.get("fromdate"),data.get("todate")]
+
+            return requestget(model=AddonTieredPricing,serializer=AddonTieredPricingSerializer,data=filter_data,page=data.get("page",1),Operator='and')
+
+        except Exception as e:
+            return HttpResponse(JSONRenderer().render({"Error":str(e)}),content_type='application/json',status=status.HTTP_400_BAD_REQUEST)
+
+
+class AddonDiscountCouponFilter(ListAPIView):
+    queryset=AddonDiscountCoupon.objects.all()
+    serializer_class=AddonDiscountCouponSerializer
+
+    def post(self,request,*args,**kwargs):
+        try:
+            data=request.data
+            filter_data={"Is_Deleted":False}
+
+            if data.get("Created_By"):
+                filter_data["Created_By"]=data.get("Created_By")
+            if data.get("fromdate") and data.get("todate"):
+                filter_data["Created_Date__date__range"]=[data.get("fromdate"),data.get("todate")]
+
+            return requestget(model=AddonDiscountCoupon,serializer=AddonDiscountCouponSerializer,data=filter_data,page=data.get("page",1),Operator='and')
+
+        except Exception as e:
+            return HttpResponse(JSONRenderer().render({"Error":str(e)}),content_type='application/json',status=status.HTTP_400_BAD_REQUEST)
 
