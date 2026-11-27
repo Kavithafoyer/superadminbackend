@@ -1693,13 +1693,7 @@ class PartnerLogin(APIView):
             output_data = serializer.data
             output_data.pop('Password', None)         # never send the password back
 
-            # Attach assigned role and permissions from PartnerUserRole
-            user_role = PartnerUserRole.objects.filter(user_id__iexact=email, Is_Deleted=False).first()
-            if user_role and user_role.role:
-                output_data['role'] = user_role.role.role_name
-                output_data['role_display'] = user_role.role.display_name
-                output_data['permissions'] = user_role.role.permissions
-            elif partner.Partner_Type:
+            if partner.Partner_Type:
                 output_data['role'] = partner.Partner_Type
 
             output = JSONRenderer().render(output_data)
