@@ -724,8 +724,31 @@ class ProductCategory(models.Model):
         return self.Category_Name or ''
 
 
+def Product_Id_I():
+    Task = ProductMaster.objects.all().order_by('id').last()
+    if not Task:
+        return "P_ID" + "000000001"
+    Tasking = Task.Product_Id
+    if not Tasking:
+        return "P_ID" + "000000001"
+    try:
+        Taski = int(Tasking[3:])
+        Tas = Taski + 1
+        Configur = "P_ID" + str(Tas).zfill(9)
+        return Configur
+    except Exception:
+        import re
+        digits = re.findall(r'\d+', str(Tasking))
+        if digits:
+            Tas = int(digits[-1]) + 1
+            return "P_ID" + str(Tas).zfill(9)
+        return "P_ID" + "000000001"
+
+
+
 class ProductMaster(models.Model):
     Organization_Id = models.ForeignKey(Userorganizationmaster, on_delete=models.CASCADE, blank=True, null=True)
+    Product_Id=models.CharField(max_length=1000,unique=True,default=Product_Id_I)
     Product_Code = models.CharField(max_length=100, blank=True, null=True, unique=True)
     Product_Name = models.CharField(max_length=250, blank=True, null=True)
     Description = models.TextField(blank=True, null=True)
@@ -929,6 +952,7 @@ class Plan(models.Model):
     Updated_Date = models.DateTimeField(default=timezone.now,blank=True,null=True)
     # role = models.ForeignKey('authapp.Role', on_delete=models.SET_NULL, null=True, blank=True, related_name='plans')
     menu = models.ManyToManyField('authapp.Menu', blank=True, related_name='menus')
+    Product_Feature=models.ManyToManyField('ProductFeature', blank=True)
 
     @property
     def PlanDetails(self):
@@ -2567,6 +2591,63 @@ class AuditHistory(models.Model):
             models.Index(fields=['User_Id', 'Created_Date']),
             models.Index(fields=['Is_Deleted']),
         ]
+
+
+class ProductPricing(models.Model):
+    Pricing_Id = models.CharField(max_length=50, unique=True)
+    Pricing_Code = models.CharField(max_length=100, blank=True, null=True)
+    Organization_Id = models.ForeignKey(Userorganizationmaster, on_delete=models.SET_NULL, blank=True, null=True, related_name='org_product_pricings')
+    Category_Id = models.ForeignKey(ProductCategory, on_delete=models.SET_NULL, blank=True, null=True, related_name='category_pricings')
+    Product_Id = models.ForeignKey('ProductMaster', on_delete=models.CASCADE, related_name='product_pricings')
+    Edition_Id = models.ForeignKey('ProductEdition', on_delete=models.SET_NULL, related_name='edition_pricings', blank=True, null=True)
+    Plan_Id = models.ForeignKey('Plan', on_delete=models.SET_NULL, related_name='plan_pricings', blank=True, null=True)
+    Country = models.CharField(max_length=100, blank=True, null=True)
+    Region = models.CharField(max_length=100, blank=True, null=True)
+    Currency = models.CharField(max_length=20, blank=True, null=True, default='INR')
+    Currency_Symbol = models.CharField(max_length=10, blank=True, null=True, default='₹')
+    Price = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    Billing_Cycle = models.CharField(max_length=30, blank=True, null=True, default='Monthly')
+    Pricing_Model = models.CharField(max_length=50, blank=True, null=True, default='Per Tenant')
+    Status = models.CharField(max_length=30, blank=True, null=True, default='Active')
+    Effective_From = models.DateField(blank=True, null=True)
+    Effective_To = models.DateField(blank=True, null=True)
+    Tax_Treatment = models.CharField(max_length=50, blank=True, null=True, default='Exclusive of Tax')
+    HSN_SAC_Code = models.CharField(max_length=100, blank=True, null=True)
+    Tax_Rate = models.DecimalField(max_digits=6, decimal_places=2, blank=True, null=True)
+    Tax_Label = models.CharField(max_length=50, blank=True, null=True)
+    Configured_Tiers = models.JSONField(default=list, blank=True, null=True)
+    Applicability = models.JSONField(default=dict, blank=True, null=True)
+    Terms_And_Notes = models.TextField(blank=True, null=True)
+    Is_Active = models.BooleanField(default=True, blank=True, null=True)
+    Is_Deleted = models.BooleanField(default=False, blank=True, null=True)
+    Created_By = models.ForeignKey(UserAdmin, on_delete=models.SET_NULL, blank=True, null=True, related_name='created_product_pricings')
+    Created_Date = models.DateTimeField(default=timezone.now, blank=True, null=True)
+    Updated_By = models.ForeignKey(UserAdmin, on_delete=models.SET_NULL, blank=True, null=True, related_name='updated_product_pricings')
+    Updated_Date = models.DateTimeField(default=timezone.now, blank=True, null=True)
+
+    class Meta:
+        db_table = 'ProductPricing'
+        ordering = ['-id']
+
+
+class ProductPriceHistory(models.Model):
+    History_Id = models.CharField(max_length=50, unique=True)
+    Product_Pricing = models.ForeignKey(ProductPricing, on_delete=models.CASCADE, related_name='price_history')
+    Pricing_Id = models.CharField(max_length=50, blank=True, null=True)
+    Product_Label = models.CharField(max_length=250, blank=True, null=True)
+    Old_Price = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    New_Price = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    Currency = models.CharField(max_length=20, default='INR')
+    Reason = models.TextField(blank=True, null=True)
+    Changed_By_Name = models.CharField(max_length=150, blank=True, null=True)
+    Changed_By = models.ForeignKey(UserAdmin, on_delete=models.SET_NULL, blank=True, null=True, related_name='product_price_changes')
+    Change_Date = models.DateTimeField(default=timezone.now, blank=True, null=True)
+    Status = models.CharField(max_length=30, default='Applied')
+    Is_Deleted = models.BooleanField(default=False)
+
+    class Meta:
+        db_table = 'ProductPriceHistory'
+        ordering = ['-Change_Date', '-id']
 
 
 # ==========================================
