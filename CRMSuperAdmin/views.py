@@ -1534,7 +1534,7 @@ class ProductMasterCRUD(APIView):
                 return HttpResponse(JSONRenderer().render(serializer.data), content_type='application/json')
             elif code:
                 product = ProductMaster.objects.filter(
-                    Q(Product_Code__iexact=code) | Q(Product_Name__iexact=code),
+                    Q(Product_Code__iexact=code) | Q(Product_Id__iexact=code) | Q(Product_Name__iexact=code),
                     Is_Deleted=False
                 ).first()
                 if not product:
@@ -1573,11 +1573,14 @@ class ProductMasterCRUD(APIView):
                         data['Organization_Id'] = first_org.id
 
             # Auto-generate Product_Code if missing or "Automatic"
-            prod_code = data.get('Product_Code') or data.get('Product_Id')
+            prod_code = data.get('Product_Code')
             if not prod_code or prod_code == 'Automatic':
                 data['Product_Code'] = generate_product_code()
             else:
                 data['Product_Code'] = prod_code
+
+            # Always auto-generate Product_Id
+            data['Product_Id'] = Product_Id_I()
 
             if not data.get('Created_By') and hasattr(request, 'user') and getattr(request.user, 'id', None):
                 data['Created_By'] = request.user.id
@@ -1607,7 +1610,7 @@ class ProductMasterCRUD(APIView):
                 product = ProductMaster.objects.get(id=pk)
             elif prod_code:
                 product = ProductMaster.objects.filter(
-                    Q(Product_Code__iexact=prod_code) | Q(Product_Name__iexact=prod_code)
+                    Q(Product_Code__iexact=prod_code) | Q(Product_Id__iexact=prod_code) | Q(Product_Name__iexact=prod_code)
                 ).first()
                 if not product:
                     raise ProductMaster.DoesNotExist
@@ -1641,7 +1644,7 @@ class ProductMasterCRUD(APIView):
                 product = ProductMaster.objects.get(id=pk)
             elif prod_code:
                 product = ProductMaster.objects.filter(
-                    Q(Product_Code__iexact=prod_code) | Q(Product_Name__iexact=prod_code)
+                    Q(Product_Code__iexact=prod_code) | Q(Product_Id__iexact=prod_code) | Q(Product_Name__iexact=prod_code)
                 ).first()
                 if not product:
                     raise ProductMaster.DoesNotExist

@@ -925,10 +925,6 @@ class ProductMasterSerializer(serializers.ModelSerializer):
         elif hasattr(data, 'copy'):
             data = data.copy()
 
-        # Backward compatibility: Product_Id mapped to Product_Code
-        if 'Product_Id' in data and not data.get('Product_Code'):
-            data['Product_Code'] = data['Product_Id']
-
         # Cloudflare_Public_Id resolution (supports list, JSON string, or legacy Cloudinary_Public_Id)
         if 'Cloudflare_Public_Id' in data or 'Cloudinary_Public_Id' in data:
             cf_val = data.get('Cloudflare_Public_Id') or data.get('Cloudinary_Public_Id')
@@ -969,7 +965,7 @@ class ProductMasterSerializer(serializers.ModelSerializer):
 
     def to_representation(self, instance):
         ret = super().to_representation(instance)
-        ret['Product_Id'] = instance.Product_Code  # backward compatibility alias
+        ret['Product_Id'] = getattr(instance, 'Product_Id', None)
         return ret
 
     def get_created_by_name(self, obj):

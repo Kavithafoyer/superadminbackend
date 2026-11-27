@@ -732,7 +732,7 @@ def Product_Id_I():
     if not Tasking:
         return "P_ID" + "000000001"
     try:
-        Taski = int(Tasking[3:])
+        Taski = int(Tasking[4:])
         Tas = Taski + 1
         Configur = "P_ID" + str(Tas).zfill(9)
         return Configur
@@ -769,11 +769,6 @@ class ProductMaster(models.Model):
     Created_Date = models.DateTimeField(default=timezone.now, blank=True, null=True)
     Updated_By = models.ForeignKey(UserAdmin, on_delete=models.CASCADE, related_name='updated_product_master_set', blank=True, null=True)
     Updated_Date = models.DateTimeField(default=timezone.now, blank=True, null=True)
-
-    @property
-    def Product_Id(self):
-        # Backward-compatibility alias
-        return self.Product_Code
 
     class Meta:
         db_table = 'ProductMaster'
