@@ -8814,27 +8814,27 @@ class PartnerCommissionInvoiceCRUD(APIView):
             if commission.commission_invoices.filter(Is_Deleted=False, Approval_Status__in=ACTIVE_INVOICE_STATUS).exists():
                 return error_response("An invoice is already submitted for this commission")
 
-            partner_invoice_no = (data.get('Partner_Invoice_No') or '').strip()
-            if not partner_invoice_no:
-                return error_response("Partner_Invoice_No is required")
+            # partner_invoice_no = (data.get('Partner_Invoice_No') or '').strip()
+            # if not partner_invoice_no:
+            #     return error_response("Partner_Invoice_No is required")
             if not data.get('Partner_Invoice_Date'):
                 return error_response("Partner_Invoice_Date is required")
-            invoice_file = request.FILES.get('Invoice_File')
-            if not invoice_file:
-                return error_response("Invoice_File is required")
+            # invoice_file = request.FILES.get('Invoice_File')
+            # if not invoice_file:
+            #     return error_response("Invoice_File is required")
             invoice_amount = validate_amount(data.get('Invoice_Amount'), 'Invoice_Amount')
             if invoice_amount > Decimal(commission.Commission_Amount or 0):
                 return error_response(f"Invoice_Amount cannot exceed commission amount {commission.Commission_Amount}")
             if PartnerCommissionInvoice.objects.filter(
-                    Q(Partner_Id_id=commission.Partner_Id_id) & Q(Partner_Invoice_No__iexact=partner_invoice_no) & Q(Is_Deleted=False)
+                    Q(Partner_Id_id=commission.Partner_Id_id) & Q(Is_Deleted=False)
             ).exclude(Approval_Status='Rejected').exists():
                 return error_response("This invoice number is already used")
 
             data['Partner_Id'] = commission.Partner_Id_id
             data['Created_By'] = commission.Partner_Id_id
-            data['Partner_Invoice_No'] = partner_invoice_no
-            data['Invoice_File'] = invoice_file
-            data['Invoice_File_Name'] = invoice_file.name[:100]
+            # data['Partner_Invoice_No'] = partner_invoice_no
+            # data['Invoice_File'] = invoice_file
+            # data['Invoice_File_Name'] = invoice_file.name[:100]
             data['Approval_Status'] = 'Submitted'
             data['Payment_Status'] = 'Pending'
 
