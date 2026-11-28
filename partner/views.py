@@ -8793,6 +8793,160 @@ class PartnerCommissionDashboard(APIView):
 
 # ==================== Partner Commission Invoice ====================
 
+# class PartnerCommissionInvoiceCRUD(APIView):
+#     parser_classes = [MultiPartParser, FormParser, JSONParser]
+
+#     @transaction.atomic
+#     def post(self, request, *args, **kwargs):
+#         try:
+#             data = get_data(request)
+#             for key in INVOICE_PROTECTED_FIELDS:
+#                 data.pop(key, None)
+
+#             commission = PartnerCommission.objects.select_for_update().get(id=data.get('PartnerCommission_Id'), Is_Deleted=False)
+#             if str(commission.Partner_Id_id) != str(data.get('Partner_Id')):
+#                 return error_response("This commission does not belong to this partner", status.HTTP_403_FORBIDDEN)
+#             if commission.Commission_Status not in INVOICE_ALLOWED_STATUS:
+#                 return error_response(f"Invoice cannot be raised. Commission status is {commission.Commission_Status}")
+#             is_eligible, message = check_invoice_eligibility(commission)
+#             if not is_eligible:
+#                 return error_response(message)
+#             if commission.commission_invoices.filter(Is_Deleted=False, Approval_Status__in=ACTIVE_INVOICE_STATUS).exists():
+#                 return error_response("An invoice is already submitted for this commission")
+
+#             # partner_invoice_no = (data.get('Partner_Invoice_No') or '').strip()
+#             # if not partner_invoice_no:
+#             #     return error_response("Partner_Invoice_No is required")
+#             if not data.get('Partner_Invoice_Date'):
+#                 return error_response("Partner_Invoice_Date is required")
+#             # invoice_file = request.FILES.get('Invoice_File')
+#             # if not invoice_file:
+#             #     return error_response("Invoice_File is required")
+#             invoice_amount = validate_amount(data.get('Invoice_Amount'), 'Invoice_Amount')
+#             if invoice_amount > Decimal(commission.Commission_Amount or 0):
+#                 return error_response(f"Invoice_Amount cannot exceed commission amount {commission.Commission_Amount}")
+#             if PartnerCommissionInvoice.objects.filter(
+#                     Q(Partner_Id_id=commission.Partner_Id_id) & Q(Is_Deleted=False)
+#             ).exclude(Approval_Status='Rejected').exists():
+#                 return error_response("This invoice number is already used")
+
+#             data['Partner_Id'] = commission.Partner_Id_id
+#             data['Created_By'] = commission.Partner_Id_id
+#             # data['Partner_Invoice_No'] = partner_invoice_no
+#             # data['Invoice_File'] = invoice_file
+#             # data['Invoice_File_Name'] = invoice_file.name[:100]
+#             data['Approval_Status'] = 'Submitted'
+#             data['Payment_Status'] = 'Pending'
+
+#             serializer = PartnerCommissionInvoiceSerializer(data=data)
+#             if serializer.is_valid():
+#                 serializer.save()
+#                 commission.Commission_Status = 'Invoice Submitted'
+#                 commission.Updated_Date = timezone.now()
+#                 commission.save()
+#                 output = JSONRenderer().render(serializer.data)
+#                 return HttpResponse(output, content_type='application/json', status=status.HTTP_201_CREATED)
+#             output = JSONRenderer().render(serializer.errors)
+#             return HttpResponse(output, content_type='application/json', status=status.HTTP_400_BAD_REQUEST)
+#         except PartnerCommission.DoesNotExist:
+#             return error_response("PartnerCommission not found", status.HTTP_404_NOT_FOUND)
+#         except Exception as e:
+#             return error_response(str(e))
+
+#     def get(self, request, *args, **kwargs):
+#         try:
+#             data = request.query_params
+#             id = data['id']
+#             module = PartnerCommissionInvoice.objects.get(id=id)
+#             serializer = PartnerCommissionInvoiceSerializers(module)
+#             output = JSONRenderer().render(serializer.data)
+#             return HttpResponse(output, content_type='application/json', status=status.HTTP_200_OK)
+#         except Exception as e:
+#             return error_response(str(e))
+
+#     def put(self, request, *args, **kwargs):
+#         try:
+#             data = get_data(request)
+#             id = data['id']
+#             module = PartnerCommissionInvoice.objects.get(id=id)
+#             if module.Approval_Status != 'Submitted':
+#                 return error_response(f"Invoice cannot be changed once {module.Approval_Status}")
+
+#             for key in INVOICE_PROTECTED_FIELDS + ['Partner_Id', 'PartnerCommission_Id', 'Created_By']:
+#                 data.pop(key, None)
+#             if 'Invoice_Amount' in data:
+#                 invoice_amount = validate_amount(data['Invoice_Amount'], 'Invoice_Amount')
+#                 if invoice_amount > Decimal(module.PartnerCommission_Id.Commission_Amount or 0):
+#                     return error_response(f"Invoice_Amount cannot exceed commission amount {module.PartnerCommission_Id.Commission_Amount}")
+#             if request.FILES.get('Invoice_File'):
+#                 data['Invoice_File'] = request.FILES['Invoice_File']
+#                 data['Invoice_File_Name'] = request.FILES['Invoice_File'].name[:100]
+
+#             data['Updated_Date'] = timezone.now()
+#             serializer = PartnerCommissionInvoiceSerializer(instance=module, data=data, partial=True)
+#             if serializer.is_valid():
+#                 serializer.save()
+#                 output = JSONRenderer().render(serializer.data)
+#                 return HttpResponse(output, content_type='application/json', status=status.HTTP_200_OK)
+#             output = JSONRenderer().render(serializer.errors)
+#             return HttpResponse(output, content_type='application/json', status=status.HTTP_400_BAD_REQUEST)
+#         except Exception as e:
+#             return error_response(str(e))
+
+#     @transaction.atomic
+#     def delete(self, request, *args, **kwargs):
+#         try:
+#             data = request.query_params
+#             id = data['id']
+#             module = PartnerCommissionInvoice.objects.get(id=id)
+#             if module.Approval_Status != 'Submitted':
+#                 return error_response(f"Invoice cannot be deleted once {module.Approval_Status}")
+#             serializer = PartnerCommissionInvoiceSerializer(module, {"Is_Deleted": True, "Updated_Date": timezone.now()}, partial=True)
+#             if serializer.is_valid():
+#                 serializer.save()
+#                 # invoice withdrawn -> commission goes back to Eligible
+#                 commission = module.PartnerCommission_Id
+#                 commission.Commission_Status = 'Eligible'
+#                 commission.Updated_Date = timezone.now()
+#                 commission.save()
+#             output = JSONRenderer().render(serializer.data)
+#             return HttpResponse(output, content_type='application/json', status=status.HTTP_200_OK)
+#         except Exception as e:
+#             return error_response(str(e))
+
+#     def patch(self, request, *args, **kwargs):
+#         try:
+#             data = get_data(request)
+#             if not data:
+#                 raise TypeError("Request data cannot be empty")
+#             id = data.get('id')
+#             module = PartnerCommissionInvoice.objects.get(id=id)
+#             if module.Approval_Status != 'Submitted':
+#                 raise ValueError(f"Invoice cannot be changed once {module.Approval_Status}")
+
+#             for key in INVOICE_PROTECTED_FIELDS + ['Partner_Id', 'PartnerCommission_Id', 'Created_By']:
+#                 data.pop(key, None)
+#             if 'Invoice_Amount' in data:
+#                 invoice_amount = validate_amount(data['Invoice_Amount'], 'Invoice_Amount')
+#                 if invoice_amount > Decimal(module.PartnerCommission_Id.Commission_Amount or 0):
+#                     raise ValueError(f"Invoice_Amount cannot exceed commission amount {module.PartnerCommission_Id.Commission_Amount}")
+#             if request.FILES.get('Invoice_File'):
+#                 data['Invoice_File'] = request.FILES['Invoice_File']
+#                 data['Invoice_File_Name'] = request.FILES['Invoice_File'].name[:100]
+
+#             data['Updated_Date'] = timezone.now()
+#             serializer = PartnerCommissionInvoiceSerializer(instance=module, data=data, partial=True)
+#             serializer.is_valid(raise_exception=True)
+#             serializer.save()
+#             return Response(serializer.data, status=status.HTTP_200_OK)
+#         except PartnerCommissionInvoice.DoesNotExist:
+#             return Response({"Error": "PartnerCommissionInvoice not found"}, status=status.HTTP_404_NOT_FOUND)
+#         except Exception as e:
+#             return Response({"Error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+# ==================== Partner Commission Invoice ====================
+
 class PartnerCommissionInvoiceCRUD(APIView):
     parser_classes = [MultiPartParser, FormParser, JSONParser]
 
@@ -8814,27 +8968,28 @@ class PartnerCommissionInvoiceCRUD(APIView):
             if commission.commission_invoices.filter(Is_Deleted=False, Approval_Status__in=ACTIVE_INVOICE_STATUS).exists():
                 return error_response("An invoice is already submitted for this commission")
 
-            # partner_invoice_no = (data.get('Partner_Invoice_No') or '').strip()
-            # if not partner_invoice_no:
-            #     return error_response("Partner_Invoice_No is required")
+            partner_invoice_no = (data.get('Partner_Invoice_No') or '').strip()
             if not data.get('Partner_Invoice_Date'):
                 return error_response("Partner_Invoice_Date is required")
-            # invoice_file = request.FILES.get('Invoice_File')
-            # if not invoice_file:
-            #     return error_response("Invoice_File is required")
+            invoice_file = request.FILES.get('Invoice_File')
             invoice_amount = validate_amount(data.get('Invoice_Amount'), 'Invoice_Amount')
             if invoice_amount > Decimal(commission.Commission_Amount or 0):
                 return error_response(f"Invoice_Amount cannot exceed commission amount {commission.Commission_Amount}")
-            if PartnerCommissionInvoice.objects.filter(
-                    Q(Partner_Id_id=commission.Partner_Id_id) & Q(Is_Deleted=False)
+
+            # duplicate check only when the partner gives an invoice number
+            if partner_invoice_no and PartnerCommissionInvoice.objects.filter(
+                    Q(Partner_Id_id=commission.Partner_Id_id) &
+                    Q(Partner_Invoice_No__iexact=partner_invoice_no) &
+                    Q(Is_Deleted=False)
             ).exclude(Approval_Status='Rejected').exists():
                 return error_response("This invoice number is already used")
 
             data['Partner_Id'] = commission.Partner_Id_id
             data['Created_By'] = commission.Partner_Id_id
-            # data['Partner_Invoice_No'] = partner_invoice_no
-            # data['Invoice_File'] = invoice_file
-            # data['Invoice_File_Name'] = invoice_file.name[:100]
+            data['Partner_Invoice_No'] = partner_invoice_no or None
+            if invoice_file:
+                data['Invoice_File'] = invoice_file
+                data['Invoice_File_Name'] = invoice_file.name[:100]
             data['Approval_Status'] = 'Submitted'
             data['Payment_Status'] = 'Pending'
 
