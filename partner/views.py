@@ -8473,7 +8473,7 @@ from django.core.mail import EmailMultiAlternatives, get_connection
 
 PARTNER_PORTAL_URL = 'https://partner.pegatto.com/auth/login'
 SUPERADMIN_PORTAL_URL = ''                              # optional: Super Admin URL for the "Review Invoice" button
-COMMISSION_ADMIN_EMAILS = ['admin@foyertech.com']       # TODO: who gets the "partner raised invoice" mail
+COMMISSION_ADMIN_EMAILS = []      # optional extra Super Admin emails for the "partner raised invoice" mail, e.g. ['accounts@foyertech.com']
 
 
 def smtp_connection(host, port, mail_id, password):
@@ -8651,7 +8651,18 @@ def send_partner_invoice_submitted_mail(partner_invoice_id):
         note="Please review the invoice and approve or reject it from Partner Invoices in the Super Admin portal.",
         button_text='Review Invoice', button_url=SUPERADMIN_PORTAL_URL,
     )
-    return send_commission_mail(COMMISSION_ADMIN_EMAILS, subject, html_body, config)
+    # recipients: the Super Admin who created the customer invoice (their UserMailConfiguration mail)
+    #             + any extra emails in COMMISSION_ADMIN_EMAILS
+    to_list = list(COMMISSION_ADMIN_EMAILS)
+    invoice = commission.Invoice_Id if commission else None
+    if invoice and invoice.Created_By_id:
+        creator_config = UserMailConfiguration.objects.filter(User_Id=invoice.Created_By_id).first()
+        if creator_config and creator_config.MailId:
+            to_list.append(creator_config.MailId)
+    to_list = list(dict.fromkeys(to_list))    # remove duplicates
+    if not to_list:
+        raise ValueError("No Super Admin email found: invoice creator has no UserMailConfiguration and COMMISSION_ADMIN_EMAILS is empty")
+    return send_commission_mail(to_list, subject, html_body, config)
 
 
 # ---------- 3. Super Admin approves / rejects -> Partner ----------
