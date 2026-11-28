@@ -6157,16 +6157,24 @@ from rest_framework.generics import ListAPIView
 from rest_framework.exceptions import ValidationError
 
 
+# class SuperadminTicketManagementList(ListAPIView):
+#     serializer_class = TicketManagementSerializers
+
+#     def get_queryset(self):
+#         return TicketManagement.objects.filter(
+#             Is_Deleted=False,
+#             Partner_Id__isnull=False,
+#             PartnerTeamMember_Id__isnull=True,
+#         ).order_by('-id')
+
 class SuperadminTicketManagementList(ListAPIView):
     serializer_class = TicketManagementSerializers
 
     def get_queryset(self):
         return TicketManagement.objects.filter(
             Is_Deleted=False,
-            Partner_Id__isnull=False,
             PartnerTeamMember_Id__isnull=True,
-        ).order_by('-id')
-
+        ).select_related('Partner_Id', 'Assigned_To').order_by('-id')
 
 class PartnerMyTicketManagementList(ListAPIView):
     serializer_class = TicketManagementSerializers
@@ -9352,6 +9360,7 @@ class PartnerCommissionEligibleForInvoice(APIView):
             return error_response(str(e))
 
 
+# Commission Msil Apis
 
 
 
