@@ -20,6 +20,7 @@ urlpatterns = [
     path('PartnerMyTicketManagementList/', PartnerMyTicketManagementList.as_view(), name='partner-my-ticket-list'),
     path('PartnerAllTeamTicketManagementList/', PartnerAllTeamTicketManagementList.as_view(), name='partner-team-ticket-list'),
     path('PartnerTeamMemberTicketManagementList/', PartnerTeamMemberTicketManagementList.as_view(), name='partner-team-member-ticket-list'),
+    path('SubUserTicketManagementList/',SubUserTicketManagementList.as_view()),
 
 
     path('PartnerTeamMemberProfile/',PartnerTeamMemberProfile.as_view()),

@@ -6211,6 +6211,24 @@ class PartnerTeamMemberTicketManagementList(ListAPIView):
         ).select_related('PartnerTeamMember_Id', 'Assigned_To').order_by('-id')
 
 
+class SubUserTicketManagementList(ListAPIView):
+    serializer_class = TicketManagementSerializers
+
+    def get_queryset(self):
+        user_id = self.request.query_params.get('user_id')
+        if not user_id:
+            raise ValidationError({"user_id": "This query parameter is required."})
+
+        return TicketManagement.objects.filter(
+            Q(Is_Deleted=False) &
+            (
+                # tickets the sub user created
+                Q(Created_By=user_id, Partner_Id__isnull=True, PartnerTeamMember_Id__isnull=True) |
+                # tickets assigned to the sub user
+                Q(Assigned_To=user_id)
+            )
+        ).select_related('Partner_Id', 'PartnerTeamMember_Id', 'Assigned_To').order_by('-id')
+
 # =============================================================================
 # SALES PERFORMANCE & COMMERCIAL VELOCITY APIS
 # =============================================================================
