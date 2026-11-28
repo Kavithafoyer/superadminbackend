@@ -1879,14 +1879,14 @@ class ProductMasterLookupsAPIView(APIView):
                 .filter(Is_Deleted=False, Is_Active=True)
                 .order_by('id')
             )
-            category_id = request.query_params.get('Category_id') 
+            category_id = request.query_params.get('Category_id')
             category_name = request.query_params.get('Category_Name')
             if category_id and str(category_id).strip().isdigit():
                 products = products.filter(Category_id_id=int(str(category_id).strip()))
             if category_name:
                 products = products.filter(
                     Q(Category_id__Category_Name__icontains=str(category_name).strip())
-        
+
                 )
             results = [
                 {
@@ -3040,13 +3040,9 @@ def ID(model,serializer,id):
 
 
 # ==================== InvoiceCRUD with Partner Commission ====================
-# Only post() changed. get / put / patch / delete are the same as yours.
-#
-# Add these imports at the top of your invoice views file:
+
 import json
 from django.db import transaction
-from partner.views import validate_commission_payload, calculate_invoice_commissions   # TODO: your app name
-
 
 class InvoiceCRUD(APIView):
 
@@ -3067,20 +3063,21 @@ class InvoiceCRUD(APIView):
 
     def post(self, request, *args, **kwargs):
         try:
+            from partner.views import (validate_commission_payload, calculate_invoice_commissions,
+                                       send_mail_safely, send_customer_invoice_commission_mail)
+
             data = request.data
             # data['Invoice_Id']=Transaction_Series(data['Organization_Id'],Invoice,"Invoice","Invoice_Id",data['Invoice_Id'])
             data['Invoice_Id'] = 'INV' + str(ID(Invoice,Invoiceserializer,'Invoice_Id'))
 
             # ---------- Partner Commission: check BEFORE saving the invoice ----------
-            # Payload keys (only when this invoice has a partner):
-            #   Commission_Partner_Id, Commission_Customer_Id, Commission_InstanceRequest_Id (optional),
-            #   Commission_Items = [{"Commission_Type": "Implementation", "Amount": 100000},
-            #                       {"Commission_Type": "Product", "Product_Id": 3, "Amount": 50000}]
+            # Extra payload keys (only when this invoice has a partner):
+            #   Commission_Partner_Id, Commission_Items, Commission_InstanceRequest_Id (optional)
             commission = None
             if data.get('Commission_Items'):
                 commission = validate_commission_payload(
                     data.get('Commission_Partner_Id'),
-                    data.get('Commission_Customer_Id'),
+                    data.get('Commission_Customer_Id') or data.get('Customer_Id'),
                     data.get('Commission_Items'),
                     data.get('Commission_InstanceRequest_Id'),
                 )
@@ -3095,6 +3092,10 @@ class InvoiceCRUD(APIView):
                     partner, customer, instance_request, items = commission
                     calculate_invoice_commissions(invoice, partner, customer, items, instance_request, save=True)
 
+                    # MAIL: customer invoice created -> Partner (from Created_By's UserMailConfiguration)
+                    invoice_id, partner_id, user_id = invoice.id, partner.id, data.get('Created_By')
+                    transaction.on_commit(lambda: send_mail_safely(send_customer_invoice_commission_mail, invoice_id, partner_id, user_id))
+
             return response
 
         except Exception as e:
@@ -3103,18 +3104,32 @@ class InvoiceCRUD(APIView):
 
     def put(self, request, *args, **kwargs):
         try:
+            from partner.views import mark_invoice_payment_received
+
             data = request.data
-            return requestput(model=Invoice, serializers=Invoiceserializer, data=data,
-                              filterdata={"id": data['id']})
+            with transaction.atomic():
+                response = requestput(model=Invoice, serializers=Invoiceserializer, data=data,
+                                      filterdata={"id": data['id']})
+                # customer paid -> Product / Extension commission becomes Eligible
+                if response.status_code in [200, 201] and data.get('Payment_Status') == 'Paid':   # TODO: your exact "paid" value
+                    mark_invoice_payment_received(Invoice.objects.get(id=data['id']))
+            return response
         except Exception as e:
             return HttpResponse(JSONRenderer().render({"Error": str(e)}), content_type='application/json',
                                 status=status.HTTP_417_EXPECTATION_FAILED)
 
     def patch(self, request, *args, **kwargs):
         try:
+            from partner.views import mark_invoice_payment_received
+
             data = request.data
-            return requestpatch(model=Invoice, serializers=Invoiceserializer, data=data,
-                                filterdata={"id": data['id']})
+            with transaction.atomic():
+                response = requestpatch(model=Invoice, serializers=Invoiceserializer, data=data,
+                                        filterdata={"id": data['id']})
+                # customer paid -> Product / Extension commission becomes Eligible
+                if response.status_code in [200, 201] and data.get('Payment_Status') == 'Paid':   # TODO: your exact "paid" value
+                    mark_invoice_payment_received(Invoice.objects.get(id=data['id']))
+            return response
         except Exception as e:
             return HttpResponse(JSONRenderer().render({"Error": str(e)}), content_type='application/json',
                                 status=status.HTTP_417_EXPECTATION_FAILED)
@@ -3127,7 +3142,6 @@ class InvoiceCRUD(APIView):
         except Exception as e:
             return HttpResponse(JSONRenderer().render({"Error": str(e)}), content_type='application/json',
                                 status=status.HTTP_417_EXPECTATION_FAILED)
-
 
 
 class Invoicemylist(ListAPIView):
@@ -12610,7 +12624,7 @@ class GeneratePerformanceInvoice(APIView):
 
 
 
-                    
+
                 )
 
                 invoice = PerformanceInvoice.objects.create(
@@ -15285,7 +15299,7 @@ class AddonProductCompatibilitySearch(AddonProductCompatibilityListwithPaginatio
             module = AddonProductCompatibility.objects.filter(
                 (
                     Q(Addon_Name__icontains=data) |
-                    Q(Product_Name__icontains=data)                                                                    
+                    Q(Product_Name__icontains=data)
                 ) & Q(Is_Deleted=False)
             )
             return module
@@ -15308,7 +15322,7 @@ class AddonProductCompatibilityFilter(ListAPIView):
         try:
             data=request.data
             filter_data={"Is_Deleted":False}
-        
+
             if data.get("Created_By"):
                 filter_data["Created_By"]=data.get("Created_By")
             if data.get("fromdate") and data.get("todate"):
@@ -15355,7 +15369,7 @@ class AddonPriceTemplateCRUD(APIView):
                 qs = AddonPriceTemplate.objects.filter(Is_Deleted=False).order_by('-id')
                 serialize = AddonPriceTemplateSerializer(qs, many=True)
                 return HttpResponse(JSONRenderer().render(serialize.data), content_type="application/json", status=status.HTTP_200_OK)
-            
+
             if str(record_id).isdigit():
                 module = AddonPriceTemplate.objects.get(Q(id=record_id) | Q(AddonPriceTemplate_Id=record_id))
             else:
@@ -15376,7 +15390,7 @@ class AddonPriceTemplateCRUD(APIView):
                 module = AddonPriceTemplate.objects.get(id=record_id)
             else:
                 module = AddonPriceTemplate.objects.get(AddonPriceTemplate_Id=record_id)
-                
+
             user = request.user
             if user.is_authenticated:
                 data['Updated_By'] = user.id
@@ -15447,7 +15461,7 @@ class AddonPriceTemplateSearch(ListAPIView):
                     Q(Template_Code__icontains=data) |
                     Q(Template_Name__icontains=data) |
                     Q(Billing_Cycle__icontains=data) |
-                    Q(Billing_Type__icontains=data)                                                                    
+                    Q(Billing_Type__icontains=data)
                 ) & Q(Is_Deleted=False)
             ).order_by('-id')
             return module
@@ -15476,7 +15490,7 @@ class AddonPriceTemplateFilter(ListAPIView):
         try:
             data=request.data
             filter_data={"Is_Deleted":False}
-        
+
             if data.get("Created_By"):
                 filter_data["Created_By"]=data.get("Created_By")
             if data.get("fromdate") and data.get("todate"):
@@ -15750,7 +15764,7 @@ class AddonPricingSearch(ListAPIView):
             return AddonPricing.objects.filter(
                 (
                     Q(Addon_Name__icontains=data) |
-                    Q(Price_Template_Name__icontains=data)                                                                                   
+                    Q(Price_Template_Name__icontains=data)
                 ) & Q(Is_Deleted=False)
             ).order_by('-id')
         except Exception as e:
@@ -15779,7 +15793,7 @@ class AddonPricingFilter(ListAPIView):
         try:
             data=request.data
             filter_data={"Is_Deleted":False}
-        
+
             if data.get("Created_By"):
                 filter_data["Created_By"]=data.get("Created_By")
             if data.get("fromdate") and data.get("todate"):
@@ -16079,7 +16093,7 @@ class AddonTieredPricingSearch(ListAPIView):
         try:
             data=request.data
             filter_data={"Is_Deleted":False}
-        
+
             if data.get("Created_By"):
                 filter_data["Created_By"]=data.get("Created_By")
             if data.get("fromdate") and data.get("todate"):
@@ -16332,7 +16346,7 @@ class AddonDiscountCouponSearch(ListAPIView):
         try:
             data=request.data
             filter_data={"Is_Deleted":False}
-        
+
             if data.get("Created_By"):
                 filter_data["Created_By"]=data.get("Created_By")
             if data.get("fromdate") and data.get("todate"):
@@ -16642,7 +16656,7 @@ class AddonPriceHistoryKPIAPI(APIView):
         try:
             data=request.data
             filter_data={"Is_Deleted":False}
-        
+
             if data.get("Changed_By"):
                 filter_data["Changed_By"]=data.get("Changed_By")
             if data.get("fromdate") and data.get("todate"):

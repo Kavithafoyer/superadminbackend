@@ -196,7 +196,7 @@ urlpatterns = [
     path('PartnerTeamMemberDailyWorkUpdateList/',PartnerTeamMemberDailyWorkUpdateList.as_view()),
     path('PartnerMyDailyWorkUpdateList/',PartnerMyDailyWorkUpdateList.as_view()),
     path('PartnerAllteamDailyWorkUpdateList/',PartnerAllteamDailyWorkUpdateList.as_view()),
-
+    path('SubUserDailyWorkUpdateList/',SubUserDailyWorkUpdateList.as_view()),
 
     #for tenant provisioning job
     path('TenantProvisioningJobCRUD/',TenantProvisioningJobCRUD.as_view()),
