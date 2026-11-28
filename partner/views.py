@@ -8492,7 +8492,16 @@ def get_user_mail_config(user_id):
 
 
 def get_partner_mail_config(partner):
-    return PartnerMailConfiguration.objects.filter(Partner_Id=partner, Is_Deleted=False).order_by('-id').first()
+    try:
+        return PartnerMailConfiguration.objects.filter(Partner_Id=partner, Is_Deleted=False).order_by('-id').first()
+    except Exception as e:
+        # e.g. PartnerMailConfiguration table not migrated yet
+        logger.warning(f"PartnerMailConfiguration not available: {e}")
+        return None
+
+
+def is_mail_config_complete(config):
+    return bool(config and config.MailId and config.MailPassword and config.SMTPHost and config.SMTPPort)
 
 
 def get_partner_email(partner):
@@ -8501,6 +8510,27 @@ def get_partner_email(partner):
 
 def get_partner_name(partner):
     return getattr(partner, 'Primary_Contact_Name', None) or getattr(partner, 'Legal_Name', None) or 'Partner'
+
+
+def display_name(obj, fields):
+    # show a real name instead of "Account object (33)"
+    if not obj:
+        return '-'
+    for field in fields:
+        value = getattr(obj, field, None)
+        if value:
+            return str(value)
+    return f"#{obj.pk}"
+
+
+def customer_name(customer):
+    # TODO: put your Account name field first if it is different
+    return display_name(customer, ['Account_Name', 'Company_Name', 'Organization_Name', 'Customer_Name', 'Contact_Name', 'Name'])
+
+
+def product_name(product):
+    # TODO: put your ProductMaster name field first if it is different
+    return display_name(product, ['Product_Name', 'ProductName', 'Name', 'Product_Code'])
 
 
 def money(value):
@@ -8555,7 +8585,7 @@ def commission_lines_table(commissions):
                              for h in ['Commission ID', 'Type', 'Product', 'Order Value', 'Rate', 'Commission']) + "</tr>")
     body = ''
     for c in commissions:
-        cells = [c.PartnerCommission_id, c.Commission_Type, str(c.Product_Id) if c.Product_Id else '-',
+        cells = [c.PartnerCommission_id, c.Commission_Type, product_name(c.Product_Id) if c.Product_Id else '-',
                  money(c.Sales_Order_Value), f"{c.Commission_Percentage}%", money(c.Commission_Amount)]
         body += "<tr>" + ''.join(f"<td style='padding:8px 12px;border:1px solid #e5e5e5;'>{html_escape(str(x))}</td>" for x in cells) + "</tr>"
     return f"<table style='border-collapse:collapse;width:100%;margin:12px 0;'>{head}{body}</table>"
@@ -8570,7 +8600,7 @@ def send_customer_invoice_commission_mail(invoice_id, partner_id, user_id):
     if not commissions.exists():
         raise ValueError("No commission found for this invoice and partner")
     total = sum(Decimal(c.Commission_Amount or 0) for c in commissions)
-    customer = commissions.first().Customer_Id
+    customer = customer_name(commissions.first().Customer_Id)
 
     subject = f"New Commission Created - Invoice {invoice.Invoice_Id} for {customer}"
     html_body = mail_layout(
@@ -8594,9 +8624,12 @@ def send_customer_invoice_commission_mail(invoice_id, partner_id, user_id):
 # ---------- 2. Partner raises commission invoice -> Super Admin ----------
 def send_partner_invoice_submitted_mail(partner_invoice_id):
     pci = PartnerCommissionInvoice.objects.select_related('Partner_Id', 'PartnerCommission_Id').get(id=partner_invoice_id)
+    # sender: partner's own mailbox; if not configured, fall back to the Super Admin mailbox
     config = get_partner_mail_config(pci.Partner_Id)
-    if not config or not config.MailId or not config.MailPassword or not config.SMTPHost or not config.SMTPPort:
-        raise ValueError("Mail is not configured for this partner in PartnerMailConfiguration")
+    if not is_mail_config_complete(config):
+        config = UserMailConfiguration.objects.order_by('id').first()
+    if not is_mail_config_complete(config):
+        raise ValueError("No mail configuration found (PartnerMailConfiguration / UserMailConfiguration)")
     commission = pci.PartnerCommission_Id
     partner_name = get_partner_name(pci.Partner_Id)
 
@@ -8612,7 +8645,7 @@ def send_partner_invoice_submitted_mail(partner_invoice_id):
             ('Invoice Amount', money(pci.Invoice_Amount)),
             ('Commission ID', commission.PartnerCommission_id if commission else '-'),
             ('Commission Type', commission.Commission_Type if commission else '-'),
-            ('Customer', commission.Customer_Id if commission and commission.Customer_Id else '-'),
+            ('Customer', customer_name(commission.Customer_Id) if commission else '-'),
             ('Commission Amount', money(commission.Commission_Amount) if commission else '-'),
         ],
         note="Please review the invoice and approve or reject it from Partner Invoices in the Super Admin portal.",
@@ -8633,7 +8666,7 @@ def send_partner_invoice_status_mail(partner_invoice_id, user_id):
         ('Partner Invoice No', pci.Partner_Invoice_No or '-'),
         ('Invoice Amount', money(pci.Invoice_Amount)),
         ('Commission ID', commission.PartnerCommission_id if commission else '-'),
-        ('Customer', commission.Customer_Id if commission and commission.Customer_Id else '-'),
+        ('Customer', customer_name(commission.Customer_Id) if commission else '-'),
         ('Status', pci.Approval_Status),
     ]
     if pci.Approval_Status == 'Approved':
@@ -8665,7 +8698,7 @@ def send_partner_invoice_paid_mail(partner_invoice_id, user_id):
             ('Invoice Reference', pci.PartnerCommissionInvoice_id),
             ('Partner Invoice No', pci.Partner_Invoice_No or '-'),
             ('Commission ID', commission.PartnerCommission_id if commission else '-'),
-            ('Customer', commission.Customer_Id if commission and commission.Customer_Id else '-'),
+            ('Customer', customer_name(commission.Customer_Id) if commission else '-'),
             ('Amount Paid', money(pci.Invoice_Amount)),
             ('Payment Reference No', pci.Payment_Reference_No or '-'),
             ('Payment Date', timezone.localtime(pci.Payment_Date).strftime('%d-%b-%Y') if pci.Payment_Date else '-'),
@@ -9054,6 +9087,159 @@ class PartnerCommissionDashboard(APIView):
         except Exception as e:
             return error_response(str(e))
 
+
+# ==================== Partner Commission Invoice ====================
+
+# class PartnerCommissionInvoiceCRUD(APIView):
+#     parser_classes = [MultiPartParser, FormParser, JSONParser]
+
+#     @transaction.atomic
+#     def post(self, request, *args, **kwargs):
+#         try:
+#             data = get_data(request)
+#             for key in INVOICE_PROTECTED_FIELDS:
+#                 data.pop(key, None)
+
+#             commission = PartnerCommission.objects.select_for_update().get(id=data.get('PartnerCommission_Id'), Is_Deleted=False)
+#             if str(commission.Partner_Id_id) != str(data.get('Partner_Id')):
+#                 return error_response("This commission does not belong to this partner", status.HTTP_403_FORBIDDEN)
+#             if commission.Commission_Status not in INVOICE_ALLOWED_STATUS:
+#                 return error_response(f"Invoice cannot be raised. Commission status is {commission.Commission_Status}")
+#             is_eligible, message = check_invoice_eligibility(commission)
+#             if not is_eligible:
+#                 return error_response(message)
+#             if commission.commission_invoices.filter(Is_Deleted=False, Approval_Status__in=ACTIVE_INVOICE_STATUS).exists():
+#                 return error_response("An invoice is already submitted for this commission")
+
+#             # partner_invoice_no = (data.get('Partner_Invoice_No') or '').strip()
+#             # if not partner_invoice_no:
+#             #     return error_response("Partner_Invoice_No is required")
+#             if not data.get('Partner_Invoice_Date'):
+#                 return error_response("Partner_Invoice_Date is required")
+#             # invoice_file = request.FILES.get('Invoice_File')
+#             # if not invoice_file:
+#             #     return error_response("Invoice_File is required")
+#             invoice_amount = validate_amount(data.get('Invoice_Amount'), 'Invoice_Amount')
+#             if invoice_amount > Decimal(commission.Commission_Amount or 0):
+#                 return error_response(f"Invoice_Amount cannot exceed commission amount {commission.Commission_Amount}")
+#             if PartnerCommissionInvoice.objects.filter(
+#                     Q(Partner_Id_id=commission.Partner_Id_id) & Q(Is_Deleted=False)
+#             ).exclude(Approval_Status='Rejected').exists():
+#                 return error_response("This invoice number is already used")
+
+#             data['Partner_Id'] = commission.Partner_Id_id
+#             data['Created_By'] = commission.Partner_Id_id
+#             # data['Partner_Invoice_No'] = partner_invoice_no
+#             # data['Invoice_File'] = invoice_file
+#             # data['Invoice_File_Name'] = invoice_file.name[:100]
+#             data['Approval_Status'] = 'Submitted'
+#             data['Payment_Status'] = 'Pending'
+
+#             serializer = PartnerCommissionInvoiceSerializer(data=data)
+#             if serializer.is_valid():
+#                 serializer.save()
+#                 commission.Commission_Status = 'Invoice Submitted'
+#                 commission.Updated_Date = timezone.now()
+#                 commission.save()
+#                 output = JSONRenderer().render(serializer.data)
+#                 return HttpResponse(output, content_type='application/json', status=status.HTTP_201_CREATED)
+#             output = JSONRenderer().render(serializer.errors)
+#             return HttpResponse(output, content_type='application/json', status=status.HTTP_400_BAD_REQUEST)
+#         except PartnerCommission.DoesNotExist:
+#             return error_response("PartnerCommission not found", status.HTTP_404_NOT_FOUND)
+#         except Exception as e:
+#             return error_response(str(e))
+
+#     def get(self, request, *args, **kwargs):
+#         try:
+#             data = request.query_params
+#             id = data['id']
+#             module = PartnerCommissionInvoice.objects.get(id=id)
+#             serializer = PartnerCommissionInvoiceSerializers(module)
+#             output = JSONRenderer().render(serializer.data)
+#             return HttpResponse(output, content_type='application/json', status=status.HTTP_200_OK)
+#         except Exception as e:
+#             return error_response(str(e))
+
+#     def put(self, request, *args, **kwargs):
+#         try:
+#             data = get_data(request)
+#             id = data['id']
+#             module = PartnerCommissionInvoice.objects.get(id=id)
+#             if module.Approval_Status != 'Submitted':
+#                 return error_response(f"Invoice cannot be changed once {module.Approval_Status}")
+
+#             for key in INVOICE_PROTECTED_FIELDS + ['Partner_Id', 'PartnerCommission_Id', 'Created_By']:
+#                 data.pop(key, None)
+#             if 'Invoice_Amount' in data:
+#                 invoice_amount = validate_amount(data['Invoice_Amount'], 'Invoice_Amount')
+#                 if invoice_amount > Decimal(module.PartnerCommission_Id.Commission_Amount or 0):
+#                     return error_response(f"Invoice_Amount cannot exceed commission amount {module.PartnerCommission_Id.Commission_Amount}")
+#             if request.FILES.get('Invoice_File'):
+#                 data['Invoice_File'] = request.FILES['Invoice_File']
+#                 data['Invoice_File_Name'] = request.FILES['Invoice_File'].name[:100]
+
+#             data['Updated_Date'] = timezone.now()
+#             serializer = PartnerCommissionInvoiceSerializer(instance=module, data=data, partial=True)
+#             if serializer.is_valid():
+#                 serializer.save()
+#                 output = JSONRenderer().render(serializer.data)
+#                 return HttpResponse(output, content_type='application/json', status=status.HTTP_200_OK)
+#             output = JSONRenderer().render(serializer.errors)
+#             return HttpResponse(output, content_type='application/json', status=status.HTTP_400_BAD_REQUEST)
+#         except Exception as e:
+#             return error_response(str(e))
+
+#     @transaction.atomic
+#     def delete(self, request, *args, **kwargs):
+#         try:
+#             data = request.query_params
+#             id = data['id']
+#             module = PartnerCommissionInvoice.objects.get(id=id)
+#             if module.Approval_Status != 'Submitted':
+#                 return error_response(f"Invoice cannot be deleted once {module.Approval_Status}")
+#             serializer = PartnerCommissionInvoiceSerializer(module, {"Is_Deleted": True, "Updated_Date": timezone.now()}, partial=True)
+#             if serializer.is_valid():
+#                 serializer.save()
+#                 # invoice withdrawn -> commission goes back to Eligible
+#                 commission = module.PartnerCommission_Id
+#                 commission.Commission_Status = 'Eligible'
+#                 commission.Updated_Date = timezone.now()
+#                 commission.save()
+#             output = JSONRenderer().render(serializer.data)
+#             return HttpResponse(output, content_type='application/json', status=status.HTTP_200_OK)
+#         except Exception as e:
+#             return error_response(str(e))
+
+#     def patch(self, request, *args, **kwargs):
+#         try:
+#             data = get_data(request)
+#             if not data:
+#                 raise TypeError("Request data cannot be empty")
+#             id = data.get('id')
+#             module = PartnerCommissionInvoice.objects.get(id=id)
+#             if module.Approval_Status != 'Submitted':
+#                 raise ValueError(f"Invoice cannot be changed once {module.Approval_Status}")
+
+#             for key in INVOICE_PROTECTED_FIELDS + ['Partner_Id', 'PartnerCommission_Id', 'Created_By']:
+#                 data.pop(key, None)
+#             if 'Invoice_Amount' in data:
+#                 invoice_amount = validate_amount(data['Invoice_Amount'], 'Invoice_Amount')
+#                 if invoice_amount > Decimal(module.PartnerCommission_Id.Commission_Amount or 0):
+#                     raise ValueError(f"Invoice_Amount cannot exceed commission amount {module.PartnerCommission_Id.Commission_Amount}")
+#             if request.FILES.get('Invoice_File'):
+#                 data['Invoice_File'] = request.FILES['Invoice_File']
+#                 data['Invoice_File_Name'] = request.FILES['Invoice_File'].name[:100]
+
+#             data['Updated_Date'] = timezone.now()
+#             serializer = PartnerCommissionInvoiceSerializer(instance=module, data=data, partial=True)
+#             serializer.is_valid(raise_exception=True)
+#             serializer.save()
+#             return Response(serializer.data, status=status.HTTP_200_OK)
+#         except PartnerCommissionInvoice.DoesNotExist:
+#             return Response({"Error": "PartnerCommissionInvoice not found"}, status=status.HTTP_404_NOT_FOUND)
+#         except Exception as e:
+#             return Response({"Error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
 
 # ==================== Partner Commission Invoice ====================
